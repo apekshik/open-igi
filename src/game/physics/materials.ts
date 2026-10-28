@@ -60,3 +60,21 @@ export async function loadTerrainGameMaterials(vfs: Vfs, level: string): Promise
   }
   return out;
 }
+
+/**
+ * magicobj/magicobj.qvm: `DefineMagicObj(model, model, TASKTYPE_*, ...)` gives models engine behaviour by type. Ladders
+ * are TASKTYPE_LADDER models (e.g. 435_02_1, Mission 4's water-tower ladder, whose faces are tagged Fence); rotors,
+ * wheels, glass and radar dishes are listed the same way. Returns model name → type ("LADDER", "ROTOR", ...).
+ */
+export async function loadMagicObjTypes(vfs: Vfs): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const path = "magicobj/magicobj.qvm";
+  if (!vfs.has(path)) return out;
+  for (const call of decodeQvm(await vfs.read(path))) {
+    if (call.fn !== "DefineMagicObj") continue;
+    const [model, , type] = call.args;
+    const t = typeof type === "object" && "ident" in type ? type.ident : String(type);
+    if (typeof model === "string") out.set(model, t.replace(/^TASKTYPE_/, ""));
+  }
+  return out;
+}

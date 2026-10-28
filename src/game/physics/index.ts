@@ -11,6 +11,7 @@ import { decodeCollision, type ModelCollision } from "../../formats/collision.ts
 import type { DynamicCollider, GroundHit, MoveOptions, MoveResult, PhysicsService, RayHit, RaycastOptions } from "./api.ts";
 import { gatesOpen } from "../mission/gates.ts";
 import { buildCollisionWorld, placementMatrix, type PlacedModel } from "./load.ts";
+import { loadMagicObjTypes } from "./materials.ts";
 import { toLocal, toWorld, type CollisionWorld, type DynamicBody, type GroundInfo } from "./world.ts";
 
 export function physicsSystem(): GameSystem {
@@ -45,7 +46,9 @@ export function physicsSystem(): GameSystem {
       const world = await buildCollisionWorld(game.vfs, game.level, game.origin, placed);
       // Terrain columns around the start, so the first shots and steps don't pay for building them.
       const columns = world.terrain?.prewarm(game.origin[0], game.origin[1], PREWARM_RADIUS) ?? 0;
-      game.services.physics = new IgiPhysics(game, world);
+      const physics = new IgiPhysics(game, world);
+      for (const [model, type] of await loadMagicObjTypes(game.vfs)) if (type === "LADDER") physics.ladders.add(model);
+      game.services.physics = physics;
       // Models inside ConditionalContainers (elevator-shaft blockers that exist only while the car moves, intact and
       // destroyed variants) collide only while their containers run.
       gated = world.objects.flatMap((o, index) => (o.gates?.length ? [{ index, gates: o.gates, on: true }] : []));
@@ -75,6 +78,8 @@ const TORSO_FROM = 0.5;
 
 export class IgiPhysics implements PhysicsService {
   readonly world: CollisionWorld;
+  /** Climbable ladder models (magicobj.qvm TASKTYPE_LADDER). */
+  readonly ladders = new Set<string>();
   private game: Game;
 
   constructor(game: Game, world: CollisionWorld) {
@@ -108,6 +113,7 @@ export class IgiPhysics implements PhysicsService {
       part: this.world.materialName(w.material),
       model: w.object >= 0 ? this.world.objects[w.object].model : undefined,
     };
+    if (best?.model && this.ladders.has(best.model)) best.ladder = true;
     if (best && w && w.body >= 0) {
       const body = this.colliders.get(w.body);
       best.collider = w.body;

@@ -82,6 +82,8 @@ export interface MoveOptions {
   stepHeight?: number;
   /** Minimum normal z of a surface the capsule can stand on. */
   walkableZ?: number;
+  /** Move against the real shapes only, not the grown human hulls (climbing a ladder through a tower's hull). */
+  ignoreHulls?: boolean;
 }
 
 export interface MoveResult {
@@ -125,6 +127,25 @@ class Candidates {
     this.material[i] = material;
     this.object[i] = object;
     this.body[i] = body;
+  }
+
+  /** Remove the candidates of one kind, keeping the order of the rest. */
+  drop(kind: number) {
+    let j = 0;
+    for (let i = 0; i < this.n; i++) {
+      if (this.kind[i] === kind) continue;
+      if (i !== j) {
+        this.pos.copyWithin(j * 9, i * 9, i * 9 + 9);
+        this.normal.copyWithin(j * 3, i * 3, i * 3 + 3);
+        this.box.copyWithin(j * 6, i * 6, i * 6 + 6);
+        this.kind[j] = this.kind[i];
+        this.material[j] = this.material[i];
+        this.object[j] = this.object[i];
+        this.body[j] = this.body[i];
+      }
+      j++;
+    }
+    this.n = j;
   }
 
   private grow() {
@@ -350,6 +371,7 @@ export class CollisionWorld {
       Math.max(px, px + dx) + margin, Math.max(py, py + dy) + margin, Math.max(pz, pz + dz) + height + margin,
     );
     const c = this.cand;
+    if (options.ignoreHulls) c.drop(KIND_HULL);
 
     const steps = Math.min(256, Math.max(1, Math.ceil(Math.max(Math.hypot(dx, dy), Math.abs(dz)) / (Math.max(hullRadius, 1) * 0.5))));
     let grounded = false;

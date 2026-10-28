@@ -27,6 +27,9 @@ const MOVE_CLIPS = {
   crouch: { f: 17, fr: 41, fl: 39, b: 27, br: 49, bl: 47, r: 29, l: 28 },
 };
 const CLIP = { stand: 2, crouched: 19, jump: 25, fall: 2, ladder: 168, death: [201, 202], deathHead: 204 };
+const LADDER_REACH = 1.3 * METRE;
+/** Distance from the feet to the rungs while climbing. */
+const LADDER_HUG = 0.4 * METRE;
 type Dir = keyof typeof MOVE_CLIPS.run;
 
 /** Without animation data: per-gait speeds (m/s, already x1.75) and pelvis heights (m) measured from 000.iff. */
@@ -239,7 +242,7 @@ class Player implements PlayerService {
     this.updateLean(dt, this.grounded && !this.climbing ? leanKey : 0, fwd > 0);
     const leaning = this.lean !== 0 || leanKey !== 0;
 
-    // Ladders: walking into a surface whose material is a ladder attaches to it (needs physics materials).
+    // Ladders: walking into a ladder model (magicobj.qvm TASKTYPE_LADDER, reported by physics) attaches to it.
     if (!this.climbing && fwd > 0 && !leaning && this.stance === "stand" && this.ladderAhead()) this.climbing = true;
 
     if (this.climbing) this.updateLadder(dt, fwd, input.wasPressed("jump"));
@@ -358,7 +361,19 @@ class Player implements PlayerService {
       return;
     }
     const before = this.entity.position;
-    this.moveBody(dt, [0, 0, fwd * LADDER_SPEED], true);
+    // Hug the ladder: the structure's movement hull keeps the feet about a metre out when the climb starts.
+    const gap = this.ladderDistance();
+    const ahead = direction(this.yaw);
+    const pull = gap !== null && gap > LADDER_HUG ? Math.min(gap - LADDER_HUG, METRE * dt * 2) / Math.max(dt, 1e-3) : 0;
+    if (fwd > 0) {
+      // Going up, the body follows the rungs through whatever the ladder passes (water-tower decks overhang their
+      // ladders, with no opening in their collision).
+      const p = this.entity.position;
+      const rise = fwd * LADDER_SPEED * dt;
+      const moved = pull > 0 && this.physics ? this.physics.move(p, [ahead[0] * pull * dt, ahead[1] * pull * dt, rise], this.entity.radius, this.entity.height, { ignoreHulls: true }).position : p;
+      this.entity.position = [moved[0], moved[1], p[2] + rise];
+      this.grounded = false;
+    } else this.moveBody(dt, [ahead[0] * pull, ahead[1] * pull, fwd * LADDER_SPEED], true);
     if (!this.ladderAhead()) {
       // Top (or bottom) reached: step forward off the ladder.
       this.climbing = false;
@@ -369,13 +384,25 @@ class Player implements PlayerService {
     }
   }
 
+  /** How far ahead of the feet a ladder is grabbed: ladder hulls (e.g. 435_02_1) stand 0.76 m proud of the rungs, so the feet stop about 1 m away. */
   private ladderAhead(): boolean {
+    return this.ladderDistance() !== null;
+  }
+
+  /** Distance to the ladder in front (world units), or null if there is none within reach. */
+  private ladderDistance(): number | null {
     const physics = this.physics;
-    if (!physics) return false;
+    if (!physics) return null;
     const f = this.entity.position;
-    const from: Vec3 = [f[0], f[1], f[2] + 1.0 * METRE];
-    const hit = physics.raycast(from, vec3.add(from, vec3.scale(direction(this.yaw), 0.7 * METRE)), { entities: false });
-    return !!hit?.part && /ladder/i.test(hit.part);
+    const ahead = vec3.scale(direction(this.yaw), LADDER_REACH);
+    // Knee, chest and head height: braces of the structure a ladder is fixed to can hide it at one of them.
+    let best: number | null = null;
+    for (const h of [0.3, 1.0, 1.6]) {
+      const from: Vec3 = [f[0], f[1], f[2] + h * METRE];
+      const hit = physics.raycast(from, vec3.add(from, ahead), { entities: false });
+      if (hit && (hit.ladder || (hit.part && /ladder/i.test(hit.part))) && (best === null || hit.distance < best)) best = hit.distance;
+    }
+    return best;
   }
 
   /** Move the feet through physics, handle ground snapping, take-off into a fall, and landing. */
@@ -388,7 +415,8 @@ class Player implements PlayerService {
     let next: Vec3;
     let grounded: boolean;
     if (physics) {
-      const r = physics.move(feet, delta, this.entity.radius, this.entity.height);
+      // On a ladder only the real shapes hold the body: towers' movement hulls close over their ladders.
+      const r = physics.move(feet, delta, this.entity.radius, this.entity.height, climbing ? { ignoreHulls: true } : undefined);
       next = r.position;
       grounded = r.grounded;
     } else {

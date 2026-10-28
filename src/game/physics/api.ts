@@ -22,6 +22,8 @@ export interface RayHit {
   model?: string;
   /** Id of the dynamic collider hit (door, vehicle, train car), if any. */
   collider?: number;
+  /** The model hit is a climbable ladder (TASKTYPE_LADDER in magicobj/magicobj.qvm). */
+  ladder?: boolean;
 }
 
 export interface RaycastOptions {
@@ -74,6 +76,8 @@ export interface MoveOptions {
   stepHeight?: number;
   /** Steepest walkable slope, as the minimum normal z (default cos 50°). */
   walkableZ?: number;
+  /** Collide with real shapes only, not the grown human hulls (ladder climbing: hulls close over ladders). */
+  ignoreHulls?: boolean;
 }
 
 export interface MoveResult {
