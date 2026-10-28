@@ -582,8 +582,10 @@ export class FrontEnd {
     const elapsed = this.game.services.mission?.elapsed() ?? this.game.time;
     const time = `${Math.floor(elapsed / 60)}:${String(Math.floor(elapsed % 60)).padStart(2, "0")}`;
     const accuracy = this.stats.shots ? `${Math.round((Math.min(this.stats.hits, this.stats.shots) / this.stats.shots) * 100)}%` : "-";
+    // The mission system reports a reason code; "complete"/"failed" just repeat the title.
+    const why = ({ killed: "Jones was killed.", time: "Out of time." } as Record<string, string>)[reason];
     const lines = [
-      ...(reason ? [reason] : []),
+      ...(why ? [why] : []),
       `Mission time:  ${time}`,
       `Enemies killed:  ${this.stats.kills}`,
       `Shots fired:  ${this.stats.shots}`,

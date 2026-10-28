@@ -55,7 +55,7 @@ export async function buildCollisionWorld(vfs: Vfs, level: LoadedLevel, origin: 
   for (const p of placed) {
     const collision = collisionOf(p.placement.model);
     if (!collision || (!collision.hit && !collision.human)) continue;
-    objects.push({ model: p.placement.model, collision, matrix: p.matrix ?? placementMatrix(p.placement, origin) });
+    objects.push({ model: p.placement.model, collision, matrix: p.matrix ?? placementMatrix(p.placement, origin), gates: p.placement.gates });
   }
   return new CollisionWorld({ origin, terrain: level.terrain.data, terrainGameMaterials, materials, objects });
 }
