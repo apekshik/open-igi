@@ -16,7 +16,7 @@ Reference install: the English PC release (`IGI.exe`, 1,384,448 bytes), 1,940 fi
 | .tex | 26 loose + ~6,900 in archives | 7.2 | `LOOP` | v11 confirmed | `src/formats/tex.ts` |
 | .lmp / .cmd / .ctr / .hmp / .bit | 14 / 14 / 14 / 6 / 14 | ~21 | none | unknown (terrain set, one per level) | |
 | .iff | 6 | 5.2 | `FORM` / `BOBJ` | unknown (animations) | |
-| .qvm | 997 | 3.7 | `LOOP` (v8) | unknown (compiled script) | |
+| .qvm | 997 | 3.7 | `LOOP` (v8) | declarative subset confirmed (all objects.qvm) | `src/formats/qvm.ts` |
 | .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry confirmed | `src/formats/mef.ts` |
 | .olm | ~25,000 in archives | | none | unknown (per-object lightmaps) | |
 | .mtp | 17 | 0.4 | `FORM` / `MTP ` | model→texture mapping confirmed | `src/formats/mtp.ts` |
@@ -133,7 +133,58 @@ A model's material slot `i` uses texture `TEXF[INST.texIndex[i]]`. In all 14 lev
 20 data
 ```
 
-## .qvm compiled script (unknown)
+## .qvm compiled script (declarative subset confirmed)
 
-`LOOP`, u32 version 8, then a table of offsets, followed by a string pool containing function names such as
-`DefineAmmoType`. Next step: map the header table to string pool / code / constants.
+`LOOP` version 8. Compiled from QSC source. Header (all u32):
+
+| offset | field |
+|---|---|
+| 0x04 | version (8) |
+| 0x08 | unknown (5) |
+| 0x0C, 0x10 | identifier offset table, identifier string pool (function names and constants like `TRUE`) |
+| 0x14, 0x18 | identifier table size (4 per entry), pool size |
+| 0x1C, 0x20 | string offset table, string pool |
+| 0x24, 0x28 | string table size, pool size |
+| 0x2C, 0x30 | bytecode offset, bytecode size (ends exactly at end of file) |
+
+Bytecode is a list of statements, each a call followed by `12`, with a final `00`:
+
+```
+call    := 0d u8:ident  18 u32:n  u32:argStart[n]  14 u32:argBytes  arg[n]
+arg     := expr* 00
+```
+
+`argStart` is relative to the start of the bytecode. Argument expressions are tiny stack programs:
+
+| op | operand | meaning |
+|---|---|---|
+| `03` | i8 | push int |
+| `04` | i16 | push int |
+| `05` | f32 | push float |
+| `09` | u8 | push string (index) |
+| `0a` | u16 | push string (index) |
+| `0d` | u8 | identifier; followed by `18…` it is a nested call, otherwise a name such as `TRUE` |
+| `0f` / `10` | | push 0 / 1 |
+| `2c` | | negate top of stack |
+
+That subset decodes every `objects.qvm`, ammo and most weapon definitions (124 of 997 scripts). AI scripts also use
+control flow (`02`, `1b` and statement forms beyond `call 12`), not yet mapped.
+
+### objects.qvm
+
+A tree of `Task_New(id, type, name, ...params, ...children)` calls. The file first declares each type's parameters
+with `Task_DeclareParameters(type, paramName, paramType, ...)`, e.g. `Building(Position: ObjectPos,
+Orientation: Real32x9, Model: String16)`. Engine-defined types (`EditRigidObj`) are not declared.
+
+| type | params used by open-igi |
+|---|---|
+| `Building`, `EditRigidObj` | x, y, z, three Euler angles (radians; third is about Z), model name; `EditRigidObj` then has scale (1,1,1) and three zeros |
+| `Fence` | x, y, z, gamma (about Z), model |
+| `Wire` | start xyz, stop xyz, model |
+| `HumanPlayer` | x, y, z, gamma, model, team (the player; Mission 1 calls it "TheGoodGuy") |
+| `HumanSoldier` | x, y, z, gamma, model, ... (AI soldiers, with `HumanAI` children) |
+| `HeightMap` | x, y, z, then (11, 128, FALSE, tileIndex, 8, 7) in Mission 1 |
+
+World units equal model units, roughly 4,000 per metre (the army truck is ~30,000 long). Z is up. Mission 1's
+compound ground is at z ≈ 174,413,100. Whether IGI's axes are mirrored relative to three.js is not yet confirmed.
+

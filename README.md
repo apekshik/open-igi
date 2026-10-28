@@ -11,7 +11,8 @@ open-igi is a free, non-commercial fan project. It is not affiliated with or end
 
 ## Status
 
-Pre-alpha: data-format research. Milestone 1 is walking around Mission 1 with its real terrain, buildings and textures.
+Pre-alpha. Every level's buildings and props load in the browser from the game's own placement scripts, with their real
+textures. Next: terrain, then characters. Milestone 1 is walking around Mission 1.
 
 ## Layout
 

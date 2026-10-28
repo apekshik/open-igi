@@ -1,5 +1,6 @@
-// Research viewers over the player's install: ?view=models (default) or ?view=textures.
+// Research viewers over the player's install: ?view=level (default), ?view=models or ?view=textures.
 import { vfsFromDevServer, vfsFromFiles, type Vfs } from "./vfs/vfs.ts";
+import { levelViewer } from "./viewer/level.ts";
 import { modelViewer } from "./viewer/models.ts";
 import { textureViewer } from "./viewer/textures.ts";
 
@@ -18,10 +19,11 @@ function start() {
   stage.replaceChildren();
   const view = viewSelect.value;
   if (view === "textures") textureViewer(vfs, toolbar, stage, status);
+  else if (view === "level") levelViewer(vfs, toolbar, stage, status);
   else modelViewer(vfs, toolbar, stage, status);
 }
 
-viewSelect.value = new URLSearchParams(location.search).get("view") ?? "models";
+viewSelect.value = new URLSearchParams(location.search).get("view") ?? "level";
 viewSelect.addEventListener("change", () => {
   history.replaceState(null, "", `?view=${viewSelect.value}`);
   start();
