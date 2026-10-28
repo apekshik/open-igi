@@ -37,6 +37,11 @@ export interface AiService {
   send(entityId: number, event: AiEvent, options?: { position?: Vec3; animation?: number }): void;
   /** Whether the base alarm is sounding (from "alarm" events). */
   readonly alarm: boolean;
+  /**
+   * Route over an AIGraph (graphs/graph<id>.dat) from the node nearest `from` to node `toNode`, as node positions,
+   * for vehicles driven by CarAI tasks along PatrolPaths. undefined while the graph is still loading, null if unknown.
+   */
+  graphRoute?(graphId: number, from: Vec3, toNode: number): Vec3[] | null | undefined;
   /** Show a marker over each character, coloured by state and sized by awareness (also ?aidebug). */
   debug: boolean;
 }

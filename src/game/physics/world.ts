@@ -279,6 +279,10 @@ export class CollisionWorld {
     for (const b of this.bodies) {
       if (!b.enabled || !rayBox(ox, oy, oz, ux, uy, uz, limit, b.box)) continue;
       toLocal(b.matrix, ox, oy, oz, lo);
+      // A ray that starts inside a collider's bounds (a guard's muzzle in a doorway beside the open door, a gunner in
+      // a vehicle) passes out of it: no shooting your own cover from the inside.
+      const lb = b.localBounds;
+      if (lo[0] > lb[0] && lo[0] < lb[3] && lo[1] > lb[1] && lo[1] < lb[4] && lo[2] > lb[2] && lo[2] < lb[5]) continue;
       dirToLocal(b.matrix, ux, uy, uz, ld);
       const h = b.bvh.raycast(lo[0], lo[1], lo[2], ld[0], ld[1], ld[2], limit, mask);
       if (h) {

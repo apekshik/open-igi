@@ -44,6 +44,10 @@ export function missionSystem(): GameSystem {
           ground: (x, y, z, ignoreTaskId) => objects?.ground(x, y, z, ignoreTaskId) ?? null,
           train: (id) => game.services.world?.train(id),
           modelExtent: (model) => objects?.modelExtent(model) ?? null,
+          route: (graph, from, node) => {
+            const ai = game.services.ai;
+            return ai?.graphRoute ? ai.graphRoute(graph, from, node) : null;
+          },
           aiDetects: (taskId) => {
             const c = ai()?.characters().find((ch) => ch.taskId === taskId);
             return !!c && c.alive && (c.state === "alert" || c.state === "combat");
@@ -55,6 +59,7 @@ export function missionSystem(): GameSystem {
       );
       for (const e of logic.errors) console.warn(`[mission] ${e}`);
       objects = new MissionObjects(game, logic);
+      (globalThis as Record<string, unknown>).__logic = logic; // DEBUG
 
       // Sounds: the audio system resolves level sound conditions (ConditionalSound, AmbientArea containers) against
       // our task state; object sounds come from the objects.qvm parameters (SoundDef names).

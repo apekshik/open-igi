@@ -23,7 +23,7 @@ import type { Entity } from "../entity.ts";
 import type { GameEvents } from "../events.ts";
 import { evaluate, parseExpression, run, truthy, type ScriptEnv, type ScriptValue } from "./script.ts";
 import { pbool, pnum, pstr, pvec, type TaskNode, type TaskTree } from "./tasks.ts";
-import { applyKey, decodeAnimData, newVehicleState, stepVehicle, type VehicleKind, type VehicleSpec, type VehicleState } from "./vehicles.ts";
+import { applyKey, autopilot, decodeAnimData, guideCar, newVehicleState, stepVehicle, type VehicleKind, type VehicleSpec, type VehicleState } from "./vehicles.ts";
 
 /** Ticks per second of the logic clock (IGI.exe registers GAME_FREQUENCY = 30). */
 export const GAME_FREQUENCY = 30;
@@ -54,6 +54,8 @@ export interface MissionWorld {
   train?(taskId: number): TrainControl | undefined;
   /** Model extents for vehicles: length along +Y and depth of the lowest point below the origin (world units). */
   modelExtent?(model: string): { length: number; bottom: number } | null;
+  /** AIGraph route from near `from` to a node (AiService.graphRoute): undefined while loading, null if none. */
+  route?(graphId: number, from: Vec3, toNode: number): Vec3[] | null | undefined;
 }
 
 /** What the mission controls of a train (WorldService.train). */
@@ -300,6 +302,13 @@ export class MissionLogic {
   // ---- ticking
 
   /** Advance logic time by dt seconds (fixed GAME_FREQUENCY ticks). */
+  private vehicleAreaCentres: Vec3[] | null = null;
+  /** Centres of the CRITERIA_VEHICLE areas (scripted cars are guided into them). */
+  vehicleAreas(): Vec3[] {
+    this.vehicleAreaCentres ??= this.tasks.filter((t): t is AreaActivateTask => t instanceof AreaActivateTask && t.forVehicles).map((t) => t.center);
+    return this.vehicleAreaCentres;
+  }
+
   /** How far the logic clock is into the next tick (0..1), for drawing moving objects between ticks. */
   get alpha(): number {
     return Math.min(1, this.accumulator * GAME_FREQUENCY);
@@ -613,6 +622,9 @@ export class AreaActivateTask extends LogicTask {
   readonly size = pvec(this.node, "Dimensions");
   readonly angle = pvec(this.node, "Orientation")[2];
   private criteria = pstr(this.node, "Criteria").trim();
+  get forVehicles() {
+    return this.criteria === "CRITERIA_VEHICLE";
+  }
 
   field(name: string) {
     if (name === "nActive") return this.count;
@@ -1526,6 +1538,10 @@ export class ElevatorTask extends ObjectTask {
   }
 }
 
+/** CarAI drivers' default speed and how close a route point counts as reached. */
+const CARAI_SPEED = (30 / 3.6) * METRE;
+const CARAI_REACH = 4 * METRE;
+
 /** Health of vehicles, in the player's health-bar units that damage events carry (3 = one full bar). */
 const VEHICLE_HEALTH: Record<VehicleKind, number> = { car: 12, heli: 9, plane: 9 };
 
@@ -1542,10 +1558,19 @@ export class VehicleTask extends ObjectTask {
   private anim: AnimTaskTask | null | undefined;
   private spec: VehicleSpec | null = null;
   private released = new Map<number, number>();
+  /** CarAI driver: PatrolPath commands over an AIGraph (see docs/formats/ai.md for the command ids). */
+  private driver: { graph: number; commands: [number, number][]; ip: number; loop: number; route: Vec3[] | null; speed: number; delay: number; done: boolean } | null = null;
+  private driverInputs = new Map<number, number>();
 
   constructor(node: TaskNode, L: MissionLogic) {
     super(node, L);
     this.kind = node.type === "Heli" ? "heli" : node.type === "Plane" ? "plane" : "car";
+    const ai = node.children.find((c) => c.type === "CarAI");
+    const path = ai && L.tree.byKey.get(`PatrolPath_${pnum(ai, "Route ID", -1)}`);
+    if (ai && path) {
+      const commands = path.children.filter((c) => c.type === "PatrolPathCommand").map((c) => [pnum(c, "Command"), pnum(c, "Command Parameter")] as [number, number]);
+      this.driver = { graph: pnum(ai, "Graph ID", -1), commands, ip: 0, loop: -1, route: null, speed: CARAI_SPEED, delay: 0, done: false };
+    }
     const v = pvec(node, "Speed").map((x) => x * METRE) as Vec3;
     this.state = newVehicleState(this.position, this.orientation, v, { kind: this.kind, length: 0, bottom: 0, thrust: pnum(node, "Original Thrust") });
     this.previous = { position: [...this.position], orientation: [...this.orientation] };
@@ -1590,9 +1615,43 @@ export class VehicleTask extends ObjectTask {
     if (anim?.running) {
       for (const k of anim.take()) applyKey(this.state, this.kind, k.channel, k.value);
       inputs = anim.inputs;
-    }
+    } else if (this.driver && this.kind === "car") inputs = this.drive();
     const ground = this.L.world.ground;
     stepVehicle(this.state, this.spec, inputs, 1 / GAME_FREQUENCY, (x, y, z) => ground?.(x, y, z, this.node.id) ?? null);
+    if (this.kind === "car" && anim?.running) guideCar(this.state, this.L.vehicleAreas(), 1 / GAME_FREQUENCY);
+  }
+
+  /** One tick of the CarAI driver: run PatrolPath commands, steer along the current route. */
+  private drive(): ReadonlyMap<number, number> {
+    const d = this.driver!;
+    const inputs = this.driverInputs;
+    const pos = this.state.position;
+    for (let guard = 0; guard < 8 && !d.done && !d.route && d.delay <= 0; guard++) {
+      if (d.ip >= d.commands.length) {
+        // "End script" (6) repeats the commands after it; with none after it, or after "Quit" (7), the car stops.
+        if (d.loop >= 0 && d.loop < d.commands.length) d.ip = d.loop;
+        else {
+          d.done = true;
+          break;
+        }
+      }
+      const [cmd, param] = d.commands[d.ip];
+      if (cmd === 2 || cmd === 3) {
+        const route = this.L.world.route?.(d.graph, pos, param);
+        if (route === undefined) break; // graph still loading: try next tick
+        d.route = route && route.length ? [...route] : null;
+      } else if (cmd === 1) d.delay = param;
+      else if (cmd === 8) d.speed = param > 0 ? (param / 3.6) * METRE : CARAI_SPEED;
+      else if (cmd === 6) d.loop = d.ip + 1;
+      else if (cmd === 7) d.done = true;
+      d.ip++;
+    }
+    if (d.delay > 0) d.delay--;
+    // Next route point: passed once within reach.
+    while (d.route && d.route.length && Math.hypot(d.route[0][0] - pos[0], d.route[0][1] - pos[1]) < CARAI_REACH) d.route.shift();
+    if (d.route && !d.route.length) d.route = null;
+    autopilot(this.state, d.route ? d.route[0] : null, d.speed, inputs);
+    return inputs;
   }
 }
 

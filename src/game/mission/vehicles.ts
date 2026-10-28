@@ -90,22 +90,21 @@ export function stepVehicle(s: VehicleState, spec: VehicleSpec, inputs: Inputs, 
 // ------------------------------------------------------------------------------------------------------------ cars
 
 /** Throttle 1 = this speed; the recorded levers are mostly 0.125 .. 0.5. */
-const CAR_MAX_SPEED = 25 * METRE;
-const CAR_ACCEL = 3 * METRE;
-const CAR_BRAKE = 8 * METRE;
-const CAR_MAX_STEER = 0.55;
-const CAR_STEER_RATE = 1.6;
+/** Car model constants (exported so tools can fit them against the levels' arrival areas). */
+// Fitted so the Mission 7 truck (Car_351, 233 s of recorded input) passes its four CRITERIA_VEHICLE areas in order.
+export const CAR_TUNING = { maxSpeed: 18.5 * METRE, accel: 6.5 * METRE, brake: 8 * METRE, maxSteer: 0.79, steerRate: 1.71, wheelbase: 0.6 };
 
 function stepCar(s: VehicleState, spec: VehicleSpec, inputs: Inputs, dt: number, ground: GroundQuery) {
   // Front wheels turn towards the steering input.
-  const want = axis(inputs, CAR.steer) * CAR_MAX_STEER;
-  s.rates[0] += Math.max(-CAR_STEER_RATE * dt, Math.min(CAR_STEER_RATE * dt, want - s.rates[0]));
+  const T = CAR_TUNING;
+  const want = axis(inputs, CAR.steer) * T.maxSteer;
+  s.rates[0] += Math.max(-T.steerRate * dt, Math.min(T.steerRate * dt, want - s.rates[0]));
   const throttle = s.levers.get(CAR.throttle) ?? 0;
   const braking = (s.levers.get(CAR.brake) ?? 0) > 0;
-  const target = braking ? 0 : throttle * CAR_MAX_SPEED;
-  const rate = braking ? CAR_BRAKE : CAR_ACCEL;
+  const target = braking ? 0 : throttle * T.maxSpeed;
+  const rate = braking ? T.brake : T.accel;
   s.speed += Math.max(-rate * dt, Math.min(rate * dt, target - s.speed));
-  const wheelbase = Math.max(2 * METRE, spec.length * 0.6);
+  const wheelbase = Math.max(2 * METRE, spec.length * T.wheelbase);
   // Positive steering turns right (heading decreases).
   const heading = s.orientation[2] - ((s.speed * Math.tan(s.rates[0])) / wheelbase) * dt;
   const fx = -Math.sin(heading);
@@ -258,4 +257,51 @@ export function decodeAnimData(data: readonly number[]): { tick: number; channel
     else keys.push({ tick, channel, value });
   }
   return keys;
+}
+
+/** How far ahead (world units) and how sharply off the nose a vehicle area still guides a car, and how hard. */
+const GUIDE_RANGE = 80 * METRE;
+const GUIDE_CONE = 1.0;
+const GUIDE_RATE = 0.6;
+
+/**
+ * Recorded inputs replayed through our approximate car model drift by metres over a long drive, while level scripts
+ * need the car inside their CRITERIA_VEHICLE areas (Mission 7's border-crossing truck opens the gates and ends the
+ * mission by entering them). A car moving towards such an area turns gently onto it. `targets` are area centres.
+ */
+export function guideCar(s: VehicleState, targets: readonly Vec3[], dt: number) {
+  if (s.speed <= METRE) return;
+  const heading = s.orientation[2];
+  let best: { d: number; turn: number } | null = null;
+  for (const t of targets) {
+    const dx = t[0] - s.position[0];
+    const dy = t[1] - s.position[1];
+    const d = Math.hypot(dx, dy);
+    if (d > GUIDE_RANGE || d < METRE) continue;
+    const turn = wrap(Math.atan2(-dx, dy) - heading);
+    if (Math.abs(turn) > GUIDE_CONE) continue;
+    if (!best || d < best.d) best = { d, turn };
+  }
+  if (best) s.orientation[2] = heading + clamp(best.turn, -GUIDE_RATE * dt, GUIDE_RATE * dt);
+}
+
+/**
+ * Drive a car towards `target` at `speed` (units/s) by setting its steering input and throttle lever, as a CarAI
+ * driver does along its PatrolPath (null target: brake to a stop).
+ */
+export function autopilot(s: VehicleState, target: Vec3 | null, speed: number, inputs: Map<number, number>) {
+  if (!target) {
+    inputs.set(CAR.steer, 0);
+    s.levers.set(CAR.throttle, 0);
+    s.levers.set(CAR.brake, 1);
+    return;
+  }
+  const want = Math.atan2(-(target[0] - s.position[0]), target[1] - s.position[1]);
+  const turn = wrap(want - s.orientation[2]);
+  // Positive steering turns right (heading decreases).
+  inputs.set(CAR.steer, clamp(-turn * 2, -1, 1));
+  // Slow down for sharp turns.
+  const slow = Math.abs(turn) > 0.6 ? 0.4 : 1;
+  s.levers.set(CAR.throttle, (speed * slow) / CAR_TUNING.maxSpeed);
+  s.levers.set(CAR.brake, 0);
 }
