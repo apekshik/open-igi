@@ -819,6 +819,9 @@ export class StatusMessageTask extends LogicTask {
     const rising = now && !this.wasTrue;
     this.wasTrue = now;
     if (!rising || (this.once && this.sent)) return;
+    // Once the level is over nothing more is said: an outro stopping restarts the gameplay container, whose messages
+    // would otherwise be sent again under the end screen (Missions 2 and 5).
+    if (this.L.ended) return;
     this.sent = true;
     this.sentTick = this.L.tickCount;
     const v = this.textExpr ? this.L.eval(this.textExpr, this) : "";
