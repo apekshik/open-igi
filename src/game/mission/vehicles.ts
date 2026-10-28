@@ -61,7 +61,9 @@ export function newVehicleState(position: Vec3, orientation: Vec3, velocity: Vec
 
 /** Lever channels of each kind (value -1 = released, keep the last value). Others are axes. */
 const CAR = { steer: 0, throttle: 1, brake: 3, levers: new Set([1, 3, 4]) };
-const HELI = { roll: 0, pitch: 1, yaw: 2, collective: 3, levers: new Set([3]) };
+const HELI = { roll: 1, pitch: 0, yaw: 2, collective: 3, levers: new Set([3]) };
+/** Channel mapping (our reading, not confirmed): channel 0 is the fore/aft cyclic (+1 nose down), 1 the lateral cyclic. */
+const HELI_SIGNS = { pitch: -1, roll: 1, yaw: -1, pitchChannel: 0, rollChannel: 1 };
 const PLANE = { roll: 0, pitch: 1, yaw: 2, throttle: 3, levers: new Set([3, 5, 6, 7, 8, 9]) };
 
 /** Apply one AnimData key to the state's levers; returns true if it was a lever. */
@@ -137,19 +139,20 @@ function stepCar(s: VehicleState, spec: VehicleSpec, inputs: Inputs, dt: number,
 // ----------------------------------------------------------------------------------------------------- helicopters
 
 /** Cyclic and pedal inputs are angular accelerations, damped (rad/s², 1/s). */
-const HELI_TILT_ACCEL = 1.2;
+const HELI_TILT_ACCEL = 2.0;
 const HELI_YAW_ACCEL = 1.5;
 const HELI_RATE_DAMPING = 2.5;
 /** Horizontal drag (1/s) and vertical drag. */
-const HELI_DRAG = 0.25;
+const HELI_DRAG = 0.15;
 const HELI_DRAG_Z = 1.0;
 const HELI_MAX_TILT = 0.9;
 
 function stepHeli(s: VehicleState, spec: VehicleSpec, inputs: Inputs, dt: number, ground: GroundQuery) {
   const r = s.rates;
-  r[0] += (axis(inputs, HELI.pitch) * HELI_TILT_ACCEL - r[0] * HELI_RATE_DAMPING) * dt;
-  r[1] += (axis(inputs, HELI.roll) * HELI_TILT_ACCEL - r[1] * HELI_RATE_DAMPING) * dt;
-  r[2] += (-axis(inputs, HELI.yaw) * HELI_YAW_ACCEL - r[2] * HELI_RATE_DAMPING) * dt;
+  const k = HELI_SIGNS;
+  r[0] += (axis(inputs, k.pitchChannel) * k.pitch * HELI_TILT_ACCEL - r[0] * HELI_RATE_DAMPING) * dt;
+  r[1] += (axis(inputs, k.rollChannel) * k.roll * HELI_TILT_ACCEL - r[1] * HELI_RATE_DAMPING) * dt;
+  r[2] += (axis(inputs, HELI.yaw) * k.yaw * HELI_YAW_ACCEL - r[2] * HELI_RATE_DAMPING) * dt;
   const o = s.orientation;
   o[0] = clamp(o[0] + r[0] * dt, -HELI_MAX_TILT, HELI_MAX_TILT);
   o[1] = clamp(o[1] + r[1] * dt, -HELI_MAX_TILT, HELI_MAX_TILT);
