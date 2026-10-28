@@ -2,10 +2,12 @@
 // WASD/QE to move (shift = fast), drag to look.
 import * as THREE from "three";
 import { decodeQvm } from "../formats/qvm.ts";
-import { parseCtr, parseHmp } from "../formats/terrain.ts";
+import { decodeTexArray } from "../formats/tex.ts";
+import { parseBit, parseCtr, parseHmp, parseLmp, terrainMaterials } from "../formats/terrain.ts";
 import { levelObjects, type LevelObjects } from "../level/objects.ts";
-import { buildTerrain, cubeMinAt, type HeightPatch } from "../level/terrain.ts";
+import { cubeMinAt, type TerrainData } from "../level/terrain.ts";
 import { levelLibrary } from "../render/library.ts";
+import { TerrainRenderer } from "../render/terrain.ts";
 import type { Vfs } from "../vfs/vfs.ts";
 import { createStage, levelNames } from "./stage.ts";
 
@@ -27,6 +29,9 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
   scene.fog = new THREE.Fog(0x9aa7b4, 300 * METRE, 4000 * METRE);
   scene.background = new THREE.Color(0x9aa7b4);
 
+  // Dev-only handle for debugging from the console.
+  if (import.meta.env.DEV) Object.assign(window, { igi: { scene, camera, renderer, terrain: () => terrain } });
+
   // World is built in IGI space (Z up) relative to `origin` to keep float precision, then turned Y-up.
   const world = new THREE.Group();
   world.rotation.x = -Math.PI / 2;
@@ -46,6 +51,8 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
     pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.004));
   });
 
+  let terrain: TerrainRenderer | null = null;
+  let origin: [number, number, number] = [0, 0, 0];
   let last = performance.now();
   renderer.setAnimationLoop((now) => {
     const dt = Math.min(0.1, (now - last) / 1000);
@@ -58,18 +65,42 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
       (keys.has("KeyS") ? 1 : 0) - (keys.has("KeyW") ? 1 : 0),
     );
     if (move.lengthSq()) camera.position.add(move.normalize().multiplyScalar(speed).applyEuler(camera.rotation));
+    // Camera (three.js, Y up) back to IGI world space (Z up).
+    terrain?.update([camera.position.x + origin[0], -camera.position.z + origin[1], camera.position.y + origin[2]]);
     renderer.render(scene, camera);
   });
+
+  // ?cam=x,y,z,yaw,pitch: metres east/north/up of the player start, and degrees. Default: just behind the start.
+  function placeCamera() {
+    const [x, y, z, yawDeg, pitchDeg] = (params.get("cam") ?? "0,-12,2,0,-8").split(",").map(Number);
+    camera.position.set(x * METRE, z * METRE, -y * METRE);
+    yaw = THREE.MathUtils.degToRad(yawDeg || 0);
+    pitch = THREE.MathUtils.degToRad(pitchDeg || 0);
+    camera.rotation.set(pitch, yaw, 0, "YXZ");
+  }
 
   async function load(level: string) {
     status(`loading ${level}...`);
     world.clear();
+    terrain = null;
     const library = await levelLibrary(vfs, level);
     const objects = levelObjects(decodeQvm(await vfs.read(`missions/location0/${level}/objects.qvm`)));
-    const origin = objects.playerStart ?? objects.placements[0]?.position ?? [0, 0, 0];
+    origin = objects.playerStart ?? objects.placements[0]?.position ?? [0, 0, 0];
 
-    const terrain = await loadTerrain(vfs, level, objects, origin);
-    world.add(terrain.mesh);
+    const t0 = performance.now();
+    terrain = new TerrainRenderer({
+      ...(await loadTerrain(vfs, level, objects)),
+      origin,
+      radius: 6000 * METRE,
+      minLevel: 7,
+      detail: Number(new URLSearchParams(location.search).get("detail") ?? 4),
+      fog: { color: (scene.fog as THREE.Fog).color, near: (scene.fog as THREE.Fog).near, far: (scene.fog as THREE.Fog).far },
+      rebuildDistance: 20 * METRE,
+    });
+    world.add(terrain.group);
+    placeCamera();
+    terrain.update([camera.position.x + origin[0], -camera.position.z + origin[1], camera.position.y + origin[2]]);
+    const terrainMs = performance.now() - t0;
 
     let placed = 0;
     const missing = new Set<string>();
@@ -92,12 +123,12 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
     marker.position.z = 0.9 * METRE;
     world.add(marker);
 
-    camera.position.set(0, 2 * METRE, 12 * METRE);
-    yaw = 0;
-    pitch = -0.15;
-    history.replaceState(null, "", `?${new URLSearchParams({ view: "level", level })}`);
+    placeCamera();
+    const q = new URLSearchParams({ view: "level", level });
+    if (params.get("cam")) q.set("cam", params.get("cam")!);
+    history.replaceState(null, "", `?${q}`);
     status(
-      `${level}: ${placed}/${objects.placements.length} placed, terrain ${terrain.triangles} tris` +
+      `${level}: ${placed}/${objects.placements.length} placed, terrain ${terrain.triangles} tris built in ${terrainMs.toFixed(0)} ms` +
         (missing.size ? ` (missing ${[...missing].slice(0, 5).join(", ")})` : "") +
         ` | WASD/QE move, shift fast, drag to look | red post = player start`,
     );
@@ -107,21 +138,22 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
   if (levels.length) load(levelSelect.value);
 }
 
-async function loadTerrain(vfs: Vfs, level: string, objects: LevelObjects, origin: [number, number, number]) {
+async function loadTerrain(vfs: Vfs, level: string, objects: LevelObjects) {
   const dir = `missions/location0/${level}/terrain`;
-  const slots = vfs.has(`${dir}/terrain.hmp`) ? parseHmp(await vfs.read(`${dir}/terrain.hmp`)) : [];
-  const patches: HeightPatch[] = objects.heightMaps
-    .filter((h) => slots[h.id])
-    .map((h) => ({ level: h.level, min: cubeMinAt(h.position, h.level), size: h.size, heights: slots[h.id]! }));
-  const built = buildTerrain(
-    { ctr: parseCtr(await vfs.read(`${dir}/terrain.ctr`)), cmd: await vfs.read(`${dir}/terrain.cmd`), patches },
-    { centre: [origin[0], origin[1]], radius: 6000 * METRE, leafDistance: 250 * METRE, minLevel: 8, origin },
-  );
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(built.positions, 3));
-  geometry.setIndex(new THREE.BufferAttribute(built.indices, 1));
-  geometry.computeVertexNormals();
-  // Untextured for now: terrain materials (terrain.tex, TextureModifier bitmaps, lightmaps) come next.
-  const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color: 0x7d8a5a, side: THREE.DoubleSide }));
-  return { mesh, triangles: built.indices.length / 3 };
+  const read = (name: string) => vfs.read(`${dir}/${name}`);
+  const hmp = vfs.has(`${dir}/terrain.hmp`) ? parseHmp(await read("terrain.hmp")) : [];
+  const bit = parseBit(await read("terrain.bit"));
+  const data: TerrainData = {
+    ctr: parseCtr(await read("terrain.ctr")),
+    cmd: await read("terrain.cmd"),
+    patches: objects.heightMaps
+      .filter((h) => hmp[h.id])
+      .map((h) => ({ level: h.level, min: cubeMinAt(h.position, h.level), size: h.size, heights: hmp[h.id]! })),
+    modifiers: objects.textureModifiers
+      .filter((m) => bit[m.bitmap])
+      .map((m) => ({ level: m.level, min: cubeMinAt(m.position, m.level), material: m.material, size: m.size, bits: bit[m.bitmap]!.bits })),
+    lightMaps: objects.terrainLightMaps.map((l) => ({ level: l.level, min: cubeMinAt(l.position, l.level), size: l.size, index: l.index })),
+    materials: terrainMaterials(decodeQvm(await read("terrain.qvm"))),
+  };
+  return { data, textures: decodeTexArray(await read("terrain.tex")), lightMaps: parseLmp(await read("terrain.lmp")) };
 }

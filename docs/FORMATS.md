@@ -15,9 +15,9 @@ Reference install: the English PC release (`IGI.exe`, 1,384,448 bytes), 1,940 fi
 | .dat | 317 | 35.2 | `0xccddeeff` / text | unknown | |
 | .tex | 26 loose + ~6,900 in archives | 7.2 | `LOOP` | v11 confirmed | `src/formats/tex.ts` |
 | .ctr / .cmd / .hmp | 14 / 14 / 6 | ~13 | none | terrain geometry confirmed | `src/formats/terrain.ts` |
-| .lmp / .bit | 14 / 14 | ~8 | none | layout known, not yet used | |
+| .lmp / .bit | 14 / 14 | ~8 | none | terrain lightmaps and texture masks confirmed | `src/formats/terrain.ts` |
 | .iff | 6 | 5.2 | `FORM` / `BOBJ` | skeletons confirmed, animation keys partial | `src/formats/anim.ts` |
-| .qvm | 997 | 3.7 | `LOOP` (v8) | declarative subset confirmed (all objects.qvm) | `src/formats/qvm.ts` |
+| .qvm | 997 | 3.7 | `LOOP` (v8) | confirmed (all 997 decode) | `src/formats/qvm.ts` |
 | .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry and type 1 skin confirmed | `src/formats/mef.ts` |
 | .olm | ~25,000 in archives | | none | unknown (per-object lightmaps) | |
 | .mtp | 17 | 0.4 | `FORM` / `MTP ` | model→texture mapping confirmed | `src/formats/mtp.ts` |
@@ -218,42 +218,95 @@ A model's material slot `i` uses texture `TEXF[INST.texIndex[i]]`. In all 14 lev
 20 data
 ```
 
-## .qvm compiled script (declarative subset confirmed)
+## .qvm compiled script (confirmed)
 
-`LOOP` version 8. Compiled from QSC source. Header (all u32):
+`LOOP` version 8. Compiled from QSC source (the `.qsc` files are not shipped). `src/formats/qvm.ts` decodes all 997
+scripts in the install (`npm run qvm -- <install dir>` prints decoded/total). Opcode names, numbering and the
+interpreter behaviour below come from flawme/igi-reverse-engineering (`reverse/docs/03-scripting`, from `IGI.exe`); the
+statement patterns and the decoder's strict checks are ours. Header (all u32):
 
 | offset | field |
 |---|---|
 | 0x04 | version (8) |
-| 0x08 | unknown (5) |
-| 0x0C, 0x10 | identifier offset table, identifier string pool (function names and constants like `TRUE`) |
+| 0x08 | section count (5) |
+| 0x0C, 0x10 | identifier offset table, identifier string pool (function names, constants like `TRUE`, variables) |
 | 0x14, 0x18 | identifier table size (4 per entry), pool size |
 | 0x1C, 0x20 | string offset table, string pool |
 | 0x24, 0x28 | string table size, pool size |
 | 0x2C, 0x30 | bytecode offset, bytecode size (ends exactly at end of file) |
+| 0x34, 0x38 | value-stack and type-stack sizes; 0 in every file (engine defaults 0x800 / 0x100) |
 
-Bytecode is a list of statements, each a call followed by `12`, with a final `00`:
+The sections tile the file in order from 0x3C.
+
+### Instructions
+
+A stack machine. Each instruction is a one-byte opcode with a fixed-width operand (except `PUSHS`/`PUSHI` and `CALL`).
+Branch targets are relative to the end of the branch instruction. All offsets are relative to the start of the code.
+`IGI.exe` names opcodes from a 49-entry table stored in reverse order (opcode = 48 − index).
+
+Confidence: **seen** = emitted by the retail compiler and decoded strictly over all 997 files (count in brackets);
+**exe** = never emitted, but its handler and operand width are known from `IGI.exe`; **inferred** = never emitted,
+named from the exe's table only, assumed operand-less.
+
+| op | name | operand | meaning | confidence |
+|---|---|---|---|---|
+| `00` | BRK | | end of an argument fragment or of the script (sets the VM's break flag) | seen (374,345) |
+| `01` | NOP | | no-op | inferred |
+| `02` | PUSH | i32 | push int | seen (8, `humanplayer.qvm`) |
+| `03` | PUSHB | i8 | push int | seen (40,286) |
+| `04` | PUSHW | i16 | push int | seen (10,346) |
+| `05` | PUSHF | f32 | push float | seen (74,191) |
+| `06` | PUSHA | i32 | push "address" (type tag 5; nothing consumes it) | exe |
+| `07` | PUSHS | inline C string | push string literal | exe |
+| `08` / `09` / `0a` | PUSHSI / PUSHSIB / PUSHSIW | u32 / u8 / u16 | push string from the string table | `09`, `0a` seen (32,754 / 56,356); `08` exe |
+| `0b` | PUSHI | inline C string | push symbol by name | exe |
+| `0c` / `0d` / `0e` | PUSHII / PUSHIIB / PUSHIIW | u32 / u8 / u16 | push symbol from the identifier table | `0d` seen (54,260); `0c`, `0e` exe |
+| `0f` / `10` / `11` | PUSH0 / PUSH1 / PUSHM | | push 0 / 1 / −1 | `0f`, `10` seen (59,821 / 59,761); `11` exe |
+| `12` | POP | | discard top of stack; ends an expression statement | seen (6,838) |
+| `13` | RET | | halts with "illegal instruction" | exe |
+| `14` | BRA | i32 | jump | seen (37,966) |
+| `15` | BF | i32 | pop; jump if false | seen (3,748) |
+| `16` | BT | i32 | pop; jump if true | exe |
+| `17` | JSR | | halts with "illegal instruction" | exe |
+| `18` | CALL | u32 n, u32 argStart[n] | pop symbol, call native function, push result | seen (34,218) |
+| `19`–`29` | ADD SUB MUL DIV SHL SHR AND OR XOR LAND LOR EQ NE LT LE GT GE | | pop b, pop a, push `a op b` (C operators; comparisons push 0/1) | seen: ADD 4, MUL 25, LAND 42, LOR 1, EQ 3,630, NE 42, LT 29, GT 30; others exe (one shared ALU handler) |
+| `2a` | ASSIGN | | pop value, pop variable symbol, store, push value | seen (46) |
+| `2b` | PLUS | | unary + | inferred |
+| `2c` | MINUS | | negate | seen (39,028) |
+| `2d` | INV | | bitwise not `~` | inferred |
+| `2e` | NOT | | logical not `!` | seen (15) |
+| `2f`, `30` | BLK, ILLEGAL | | unknown | inferred |
+
+25 opcodes appear in the retail data. `LAND`/`LOR` are plain binary ops: the compiler does not short-circuit.
+
+### Statement patterns
+
+The retail compiler's output is regular, and `decodeQvmScript` accepts only these shapes (every byte accounted for once):
 
 ```
-call    := 0d u8:ident  18 u32:n  u32:argStart[n]  14 u32:argBytes  arg[n]
-arg     := expr* 00
+script  := stmt* 00
+stmt    := expr 12                                         expression statement, value discarded
+         | expr 15:else  stmt*  14:end  else: stmt*  end:   if (expr) {…} else {…}
+call    := 0d:fn 18 n argStart[n]  14:end  arg[0] … arg[n-1]  end:
+arg     := expr 00
 ```
 
-`argStart` is relative to the start of the bytecode. Argument expressions are tiny stack programs:
+- A call pushes its callee, then `CALL`; the inline argument fragments follow a `BRA` that skips them. The native
+  function evaluates each fragment on demand by running from `argStart[i]` to its `BRK`.
+- `if` always ends its then-branch with a `BRA`; when there is no else branch it jumps to the next instruction. So
+  `if (c) {…}` and `if (c) {…} else {}` compile identically.
+- `else if` chains are nested ifs whose then-branches all jump to the same end. AI scripts are one long chain on
+  `AIFunction_GetCurrentEventType() == AIEVENT_*`.
+- No backward branch exists in any retail file: no loops. No branch occurs inside an argument (no `?:`).
+- Variables are symbols such as `EditVariable_173.nValue`, written with `ASSIGN` (`x = 2;`). AI scripts also use
+  `AIFunction_SetScript{Integer,Real}Value(slot, v)` as scratch storage.
+- Five level-4 AI scripts (`ai/540`–`544`) are just `0;` (`PUSH0 POP BRK`), presumably compiled from an empty script.
 
-| op | operand | meaning |
-|---|---|---|
-| `03` | i8 | push int |
-| `04` | i16 | push int |
-| `05` | f32 | push float |
-| `09` | u8 | push string (index) |
-| `0a` | u16 | push string (index) |
-| `0d` | u8 | identifier; followed by `18…` it is a nested call, otherwise a name such as `TRUE` |
-| `0f` / `10` | | push 0 / 1 |
-| `2c` | | negate top of stack |
+`npm run qvm -- <file>` prints a script as QSC-like source, `--asm` the raw instructions.
 
-That subset decodes every `objects.qvm`, ammo and most weapon definitions (124 of 997 scripts). AI scripts also use
-control flow (`02`, `1b` and statement forms beyond `call 12`), not yet mapped.
+Open questions:
+- Ints and floats are both plain numbers in the decoded AST, so the printer cannot show `1` vs `1.0`.
+- What `PUSHA`, `BLK` and `ILLEGAL` were for; none is emitted.
 
 ### objects.qvm
 
@@ -313,6 +366,31 @@ it add `(bilinear(h) - 64) * 256` to their vertex heights.
 **Check:** with patches applied, Mission 1's 400 placed objects sit a median 0.00 m above the decoded ground
 (10th–90th percentile: -0.5 m to +2.3 m).
 
-Not yet used: `.lmp` (8-bit lightmaps: repeated `u32 size, u8[size²]`), `terrain.tex` (LOOP v9, 18 textures of
-128×128 ARGB1555), `.bit` (texture-modifier bitmaps, same slot table as `.hmp` but 1 bit per cell), and
-`terrain.qvm` (`CreateTerrainMaterial` and tile-map tables).
+**Level of detail.** A cube at level L is drawn (instead of its children) once its face distance (Chebyshev,
+view to nearest face) reaches `163 * 2^(25-L)`; leaves (L=16) are always drawn. Within a cube, each child vertex
+(the `.cmd` vertices after the parent ones; low 6 bits = its parent vertex) slides onto its parent vertex by
+`factor = clamp(d / (2^(25-L) * 99) - 227/99, 0, 1)`, where d is its parent vertex's Chebyshev distance to the view.
+That closes cracks between neighbouring cubes at different levels. open-igi divides distances by a `detail`
+multiplier (default 4; `?detail=1` matches the game).
+
+### Texturing
+
+| file / task | contents |
+|---|---|
+| `terrain.tex` | LOOP v9: 18 images, 128×128 ARGB1555 (52-byte header, 32-byte image descriptors) |
+| `terrain.qvm` | `CreateTerrainMaterial(m, id, 32 × {bool, v1, v2, freq2, tileMap2, freq1, tileMap1})` per material and octree level; `CreateTerrainTileMap(g, 64 texture indices)` (8×8) |
+| `.bit` | same 256-slot table as `.hmp`; each slot a size×size 1-bit mask |
+| `TextureModifier` task | x, y, z, level, material, bitmap slot, size, isEdit: paints `material` where the mask is set, over the level-`level` cube containing the position |
+| `.lmp` | back-to-back `u32 size, u8[size²]` greyscale lightmaps (268 in Mission 1) |
+| `TerrainLightMap` task | x, y, z, level, size, lmp index, generated: lightmap spanning the level-`level` cube |
+
+Per vertex, the material is the first modifier (innermost cube first, at most four; within one cube, the first in
+script order) whose mask bit is set at the vertex, else material 0. Each material present in a cube draws two
+textures: near (`tex1`, frequency `freq1`/2) and far (`tex2`), each chosen from its 8×8 tile map by
+`((int)(freq * cubeCentre) >> (22-L or 23-L) & 0x7ff) >> 8`. UVs are planar in x/y; vertices with projection
+bits (bits 8–9 for tex1, 6–7 for tex2) map v to height instead, for cliffs. Near and far textures cross-fade with the
+morph factor, and child vertices blend between their own and their parent's material.
+
+The original draws three passes: the first material's near texture opaque, every other layer additively with
+per-vertex weights summing to 1, then the lightmap multiplied in as `1/3 + 2/3 × lightmap`. Texture rows are
+stored top-down with v=0 at the first row, for both ground textures and lightmaps.

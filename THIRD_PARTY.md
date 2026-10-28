@@ -7,8 +7,9 @@ open-igi builds on community reverse-engineering of Project I.G.I. Thank you to 
 <https://github.com/hjcminus/Project-IGI-Terrain>, MIT License, Copyright (c) 2026 hjcminus.
 
 An OpenGL reimplementation of IGI's terrain system, based on analysis of the decompiled `IGI.exe`. open-igi's terrain
-code (`src/formats/terrain.ts`, `src/level/terrain.ts`) follows its file layouts, octree conventions, child transform
-tables, vertex unpacking and height-patch interpolation.
+code (`src/formats/terrain.ts`, `src/level/terrain.ts`, `src/render/terrain.ts`) follows its file layouts, octree
+conventions, child transform tables, vertex unpacking, height-patch interpolation, level-of-detail and geomorph rules,
+material/tile-map texturing, texture-modifier masks and lightmap passes.
 
 ```
 MIT License
@@ -40,6 +41,10 @@ SOFTWARE.
 
 Format documentation for IGI's terrain files (`.ctr`, `.cmd`, `.hmp`, `.bit`, `.lmp`, terrain `.tex`) and the world
 scale (4096 units per metre), used as a cross-check for `docs/FORMATS.md`.
+
+Its QVM research (`reverse/docs/03-scripting`, `reverse/tools/qvm.py`, `reverse/tools/qvmdec.py`), drawn from
+`IGI.exe`, gives the opcode names and numbering, operand widths and interpreter semantics that `src/formats/qvm.ts`
+uses to decode compiled scripts.
 
 Its `.iff` animation notes (`reverse/docs/16-verified-formats`: the chunk table, `BOSH` = hierarchy + bone count,
 `PLST` parents, `TLST` rest translations, `BALH[0]` = animation count, and loader evidence that playback slerps

@@ -72,3 +72,75 @@ export function parseHmp(bytes: Uint8Array): (Uint8Array | null)[] {
   if (body !== bytes.length) throw new Error(`.hmp walk ended at ${body} of ${bytes.length}`);
   return slots;
 }
+
+/** .bit: the same 256-slot table as .hmp, then for each non-empty slot a size x size bitmap, 1 bit per cell. */
+export function parseBit(bytes: Uint8Array): ({ size: number; bits: Uint8Array } | null)[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const slots: ({ size: number; bits: Uint8Array } | null)[] = [];
+  let body = 256 * 12;
+  for (let i = 0; i < 256; i++) {
+    const size = view.getUint32(i * 12 + 8, true);
+    if (!size) {
+      slots.push(null);
+      continue;
+    }
+    const n = (size * size) / 8;
+    slots.push({ size, bits: bytes.subarray(body, body + n) });
+    body += n;
+  }
+  if (body !== bytes.length) throw new Error(`.bit walk ended at ${body} of ${bytes.length}`);
+  return slots;
+}
+
+/** .lmp: back-to-back 8-bit greyscale square lightmaps, each `u32 size` then size*size bytes. */
+export function parseLmp(bytes: Uint8Array): { size: number; pixels: Uint8Array }[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const maps: { size: number; pixels: Uint8Array }[] = [];
+  for (let at = 0; at < bytes.length; ) {
+    const size = view.getUint32(at, true);
+    maps.push({ size, pixels: bytes.subarray(at + 4, at + 4 + size * size) });
+    at += 4 + size * size;
+  }
+  return maps;
+}
+
+/** One material's settings at one octree level, from terrain.qvm CreateTerrainMaterial. */
+export interface TerrainMaterialLevel {
+  /** Near ("tex1") and far ("tex2") texture frequencies, already halved as the engine does. */
+  freq1: number;
+  freq2: number;
+  /** Tile maps choosing the near and far texture. */
+  tileMap1: number;
+  tileMap2: number;
+}
+
+export interface TerrainMaterials {
+  /** materials[material][level 0..31]. */
+  materials: TerrainMaterialLevel[][];
+  /** tileMaps[group]: 8x8 texture indices into terrain.tex, row-major by y. */
+  tileMaps: number[][];
+}
+
+/**
+ * terrain.qvm calls:
+ *   CreateTerrainMaterial(material, id, 32 x {bool, v1, v2, freq2, tileMap2, freq1, tileMap1})
+ *   CreateTerrainTileMap(group, 64 texture indices)
+ */
+export function terrainMaterials(statements: { fn: string; args: unknown[] }[]): TerrainMaterials {
+  const materials: TerrainMaterialLevel[][] = [];
+  const tileMaps: number[][] = [];
+  const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  for (const s of statements) {
+    if (s.fn === "CreateTerrainMaterial") {
+      const levels: TerrainMaterialLevel[] = [];
+      for (let l = 0; l < 32; l++) {
+        const a = 2 + l * 7;
+        levels.push({ freq2: num(s.args[a + 3]) * 0.5, tileMap2: num(s.args[a + 4]), freq1: num(s.args[a + 5]) * 0.5, tileMap1: num(s.args[a + 6]) });
+      }
+      materials[num(s.args[0])] = levels;
+    } else if (s.fn === "CreateTerrainTileMap") {
+      tileMaps[num(s.args[0])] = s.args.slice(1, 65).map(num);
+    }
+  }
+  return { materials, tileMaps };
+}
