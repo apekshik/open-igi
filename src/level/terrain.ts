@@ -86,8 +86,8 @@ export interface BuildOptions {
   atlas: LightMapAtlas;
 }
 
-const ROOT_HALF = 2 ** 30;
-const LEAF_LEVEL = 16;
+export const ROOT_HALF = 2 ** 30;
+export const LEAF_LEVEL = 16;
 const MIN_PATCH_LEVEL = 14;
 // The engine's LOD constants: a cube splits when the view is within CUBE_ACTIVE * 2^(25-L) (Chebyshev distance).
 const CUBE_ACTIVE = 163;
@@ -95,10 +95,10 @@ const MERGE_DELTA = 64;
 const MORPH_START = (CUBE_ACTIVE + MERGE_DELTA) / (CUBE_ACTIVE - MERGE_DELTA);
 
 // Child slot k's octant: x fastest, then y, then z (slot 0 = -x -y -z).
-const OCTANT = Array.from({ length: 8 }, (_, k) => [k & 1 ? 1 : -1, k & 2 ? 1 : -1, k & 4 ? 1 : -1]);
+export const OCTANT = Array.from({ length: 8 }, (_, k) => [k & 1 ? 1 : -1, k & 2 ? 1 : -1, k & 4 ? 1 : -1]);
 
 // For a cube under transform t, which stored child fills octant k: CHILD_FOR_OCTANT[t*8 + k].
-const CHILD_FOR_OCTANT = [
+export const CHILD_FOR_OCTANT = [
   0, 1, 2, 3, 4, 5, 6, 7, // identity
   2, 0, 3, 1, 6, 4, 7, 5, // rotate 90 about Z
   3, 2, 1, 0, 7, 6, 5, 4, // rotate 180
@@ -110,7 +110,7 @@ const CHILD_FOR_OCTANT = [
 ];
 
 // Composition of a parent transform (row) with a child's stored transform (column).
-const COMPOSE = [
+export const COMPOSE = [
   0, 1, 2, 3, 4, 5, 6, 7,
   1, 2, 3, 0, 5, 6, 7, 4,
   2, 3, 0, 1, 6, 7, 4, 5,

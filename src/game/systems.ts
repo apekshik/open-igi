@@ -11,5 +11,6 @@ import { weaponsSystem } from "./weapons/index.ts";
 import { worldSystem } from "./world/index.ts";
 
 export function createSystems(): GameSystem[] {
-  return [physicsSystem(), worldSystem(), audioSystem(), playerSystem(), weaponsSystem(), aiSystem(), missionSystem(), hudSystem()];
+  // World before physics: it attaches building interiors to the static objects that physics then collides with.
+  return [worldSystem(), physicsSystem(), audioSystem(), playerSystem(), weaponsSystem(), aiSystem(), missionSystem(), hudSystem()];
 }

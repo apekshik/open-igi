@@ -25,7 +25,11 @@ export type Action =
   | "weapon2"
   | "weapon3"
   | "weapon4"
-  | "weapon5";
+  | "weapon5"
+  | "weapon6"
+  | "weapon7"
+  | "weapon8"
+  | "weapon9";
 
 export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   forward: ["KeyW", "ArrowUp"],
@@ -52,12 +56,18 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   weapon3: ["Digit3"],
   weapon4: ["Digit4"],
   weapon5: ["Digit5"],
+  weapon6: ["Digit6"],
+  weapon7: ["Digit7"],
+  weapon8: ["Digit8"],
+  weapon9: ["Digit9"],
 };
 
 export class Input {
   bindings: Record<Action, string[]> = structuredClone(DEFAULT_BINDINGS);
   /** Mouse sensitivity in radians per pixel. */
   sensitivity = 0.0022;
+  /** Invert vertical mouse look (options menu). */
+  invertY = false;
   private down = new Set<string>();
   private pressed = new Set<string>();
   private mouse = { dx: 0, dy: 0 };
@@ -121,7 +131,7 @@ export class Input {
 
   /** Mouse movement since the last frame, in radians (x: yaw, y: pitch). */
   look(): { yaw: number; pitch: number } {
-    return { yaw: -this.mouse.dx * this.sensitivity, pitch: -this.mouse.dy * this.sensitivity };
+    return { yaw: -this.mouse.dx * this.sensitivity, pitch: (this.invertY ? 1 : -1) * this.mouse.dy * this.sensitivity };
   }
 
   /** Called by the game at the end of each frame. */

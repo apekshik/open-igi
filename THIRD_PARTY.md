@@ -66,6 +66,53 @@ names for the 33-bone rigs agree with the bone order documented in `docs/FORMATS
 
 [fflate](https://github.com/101arrowz/fflate) (MIT) inflates entries when importing a game zip.
 
+## flawme/igi-reverse-engineering: player rules
+
+The same project's notes on the damage handler and hit zones (`reverse/docs/06-weapons`: player max damage from
+`DefineHumanPlayerGeneral` argument 7, the 17-zone multiplier table, the player-only difficulty factor) and on world
+scale and gravity (`reverse/docs/13-implementation`) underlie the player controller in `src/game/player/`.
+
+## Haseebraza12/reimagine-igi
+
+<https://github.com/Haseebraza12/reimagine-igi>, no license stated.
+
+Read for research only; no code from it is used. Its exe analysis (`docs/gameplay.md`) gave the meaning of the
+`DefineHumanPlayerGeneral` arguments, the movement state/clip table, root-motion speeds, jump and fall-damage rules,
+lean timing, footstep-noise ranges and eye offsets that `src/game/player/` reimplements in our own terms. See
+`docs/formats/player.md`.
+
+### Fonts and menus (flawme/igi-reverse-engineering)
+
+The same project's menu notes (`reverse/docs/10-menus`: the `FONT` chunk order, `TRAN` as a Latin-1 → glyph table,
+the 40-byte `ANMF` glyph record with its UV, width, height and advance offsets, and `FNTH` fields) are the basis of
+`src/formats/font.ts`; see `docs/formats/ui.md`.
+
+## Physics and collision (hjcminus/Project-IGI-Terrain, flawme/igi-reverse-engineering)
+
+`src/game/physics/terrain.ts` ports the terrain height query of hjcminus/Project-IGI-Terrain (MIT, above):
+`Terrain::GetZ`/`RecursiveGetZ` in `source/level/terrain.cpp`, i.e. walking to the leaf cube under a point, visiting
+each x/y quadrant's upper cube before its lower one, and taking the plane of the first upward triangle that contains
+the point. flawme/igi-reverse-engineering's `.mef` notes (`reverse/docs/16-verified-formats`, `reverse/tools/mef_deep.py`)
+gave the collision chunk sizes, the `CMSH` descriptor layout (counts on disk, pointers at run time), the `CFCE`
+record and the `MESH` collision totals at `+0x6C`/`+0x70`, which `src/formats/collision.ts` builds on (see
+`docs/formats/collision.md`).
+
+## Weapons (flawme/igi-reverse-engineering)
+
+flawme/igi-reverse-engineering's weapon notes (`reverse/docs/06-weapons`, `reverse/data/weapon_parameters.tsv`,
+`reverse/data/weapon_table.tsv`, MIT) give the names and positional binding of `DefineWeaponType`'s arguments and,
+from `IGI.exe`, the damage rule (hit-zone multiplier x Damage Factor, AI dying at 1.0), the AI hit-zone multipliers
+(head 100) and the player's threshold and zone table in `DefineHumanPlayerGeneral`, which `src/formats/weapon.ts` and
+`src/game/weapons/` use. The view-model rig, ATTA records, animation tick rate, sprite layout, spread units and
+everything else in `docs/formats/weapons.md` are our own reading.
+
+## flawme/igi-reverse-engineering: mission logic
+
+The same project's task-system and level-system notes (`reverse/docs/11-task-system`, `reverse/docs/12-level-system`:
+the `language/*.res` files and `LevelFlow_GetBreakCutSceneKey` among the script natives) guided the mission system in
+`src/game/mission/`. The value of `GAME_FREQUENCY` (30) was read from IGI.exe's script constant table by us; the
+remaining task semantics come from reading the levels' own objects.qvm scripts. See `docs/formats/mission.md`.
+
 ## World rendering: sky, fog and level of detail
 
 The sky and fog in `src/render/sky.ts` and `src/game/world/environment.ts` follow hjcminus/Project-IGI-Terrain (MIT,
