@@ -17,7 +17,7 @@ Reference install: the English PC release (`IGI.exe`, 1,384,448 bytes), 1,940 fi
 | .ctr / .cmd / .hmp | 14 / 14 / 6 | ~13 | none | terrain geometry confirmed | `src/formats/terrain.ts` |
 | .lmp / .bit | 14 / 14 | ~8 | none | layout known, not yet used | |
 | .iff | 6 | 5.2 | `FORM` / `BOBJ` | unknown (animations) | |
-| .qvm | 997 | 3.7 | `LOOP` (v8) | declarative subset confirmed (all objects.qvm) | `src/formats/qvm.ts` |
+| .qvm | 997 | 3.7 | `LOOP` (v8) | confirmed (all 997 decode) | `src/formats/qvm.ts` |
 | .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry confirmed | `src/formats/mef.ts` |
 | .olm | ~25,000 in archives | | none | unknown (per-object lightmaps) | |
 | .mtp | 17 | 0.4 | `FORM` / `MTP ` | model→texture mapping confirmed | `src/formats/mtp.ts` |
@@ -134,42 +134,95 @@ A model's material slot `i` uses texture `TEXF[INST.texIndex[i]]`. In all 14 lev
 20 data
 ```
 
-## .qvm compiled script (declarative subset confirmed)
+## .qvm compiled script (confirmed)
 
-`LOOP` version 8. Compiled from QSC source. Header (all u32):
+`LOOP` version 8. Compiled from QSC source (the `.qsc` files are not shipped). `src/formats/qvm.ts` decodes all 997
+scripts in the install (`npm run qvm -- <install dir>` prints decoded/total). Opcode names, numbering and the
+interpreter behaviour below come from flawme/igi-reverse-engineering (`reverse/docs/03-scripting`, from `IGI.exe`); the
+statement patterns and the decoder's strict checks are ours. Header (all u32):
 
 | offset | field |
 |---|---|
 | 0x04 | version (8) |
-| 0x08 | unknown (5) |
-| 0x0C, 0x10 | identifier offset table, identifier string pool (function names and constants like `TRUE`) |
+| 0x08 | section count (5) |
+| 0x0C, 0x10 | identifier offset table, identifier string pool (function names, constants like `TRUE`, variables) |
 | 0x14, 0x18 | identifier table size (4 per entry), pool size |
 | 0x1C, 0x20 | string offset table, string pool |
 | 0x24, 0x28 | string table size, pool size |
 | 0x2C, 0x30 | bytecode offset, bytecode size (ends exactly at end of file) |
+| 0x34, 0x38 | value-stack and type-stack sizes; 0 in every file (engine defaults 0x800 / 0x100) |
 
-Bytecode is a list of statements, each a call followed by `12`, with a final `00`:
+The sections tile the file in order from 0x3C.
+
+### Instructions
+
+A stack machine. Each instruction is a one-byte opcode with a fixed-width operand (except `PUSHS`/`PUSHI` and `CALL`).
+Branch targets are relative to the end of the branch instruction. All offsets are relative to the start of the code.
+`IGI.exe` names opcodes from a 49-entry table stored in reverse order (opcode = 48 − index).
+
+Confidence: **seen** = emitted by the retail compiler and decoded strictly over all 997 files (count in brackets);
+**exe** = never emitted, but its handler and operand width are known from `IGI.exe`; **inferred** = never emitted,
+named from the exe's table only, assumed operand-less.
+
+| op | name | operand | meaning | confidence |
+|---|---|---|---|---|
+| `00` | BRK | | end of an argument fragment or of the script (sets the VM's break flag) | seen (374,345) |
+| `01` | NOP | | no-op | inferred |
+| `02` | PUSH | i32 | push int | seen (8, `humanplayer.qvm`) |
+| `03` | PUSHB | i8 | push int | seen (40,286) |
+| `04` | PUSHW | i16 | push int | seen (10,346) |
+| `05` | PUSHF | f32 | push float | seen (74,191) |
+| `06` | PUSHA | i32 | push "address" (type tag 5; nothing consumes it) | exe |
+| `07` | PUSHS | inline C string | push string literal | exe |
+| `08` / `09` / `0a` | PUSHSI / PUSHSIB / PUSHSIW | u32 / u8 / u16 | push string from the string table | `09`, `0a` seen (32,754 / 56,356); `08` exe |
+| `0b` | PUSHI | inline C string | push symbol by name | exe |
+| `0c` / `0d` / `0e` | PUSHII / PUSHIIB / PUSHIIW | u32 / u8 / u16 | push symbol from the identifier table | `0d` seen (54,260); `0c`, `0e` exe |
+| `0f` / `10` / `11` | PUSH0 / PUSH1 / PUSHM | | push 0 / 1 / −1 | `0f`, `10` seen (59,821 / 59,761); `11` exe |
+| `12` | POP | | discard top of stack; ends an expression statement | seen (6,838) |
+| `13` | RET | | halts with "illegal instruction" | exe |
+| `14` | BRA | i32 | jump | seen (37,966) |
+| `15` | BF | i32 | pop; jump if false | seen (3,748) |
+| `16` | BT | i32 | pop; jump if true | exe |
+| `17` | JSR | | halts with "illegal instruction" | exe |
+| `18` | CALL | u32 n, u32 argStart[n] | pop symbol, call native function, push result | seen (34,218) |
+| `19`–`29` | ADD SUB MUL DIV SHL SHR AND OR XOR LAND LOR EQ NE LT LE GT GE | | pop b, pop a, push `a op b` (C operators; comparisons push 0/1) | seen: ADD 4, MUL 25, LAND 42, LOR 1, EQ 3,630, NE 42, LT 29, GT 30; others exe (one shared ALU handler) |
+| `2a` | ASSIGN | | pop value, pop variable symbol, store, push value | seen (46) |
+| `2b` | PLUS | | unary + | inferred |
+| `2c` | MINUS | | negate | seen (39,028) |
+| `2d` | INV | | bitwise not `~` | inferred |
+| `2e` | NOT | | logical not `!` | seen (15) |
+| `2f`, `30` | BLK, ILLEGAL | | unknown | inferred |
+
+25 opcodes appear in the retail data. `LAND`/`LOR` are plain binary ops: the compiler does not short-circuit.
+
+### Statement patterns
+
+The retail compiler's output is regular, and `decodeQvmScript` accepts only these shapes (every byte accounted for once):
 
 ```
-call    := 0d u8:ident  18 u32:n  u32:argStart[n]  14 u32:argBytes  arg[n]
-arg     := expr* 00
+script  := stmt* 00
+stmt    := expr 12                                         expression statement, value discarded
+         | expr 15:else  stmt*  14:end  else: stmt*  end:   if (expr) {…} else {…}
+call    := 0d:fn 18 n argStart[n]  14:end  arg[0] … arg[n-1]  end:
+arg     := expr 00
 ```
 
-`argStart` is relative to the start of the bytecode. Argument expressions are tiny stack programs:
+- A call pushes its callee, then `CALL`; the inline argument fragments follow a `BRA` that skips them. The native
+  function evaluates each fragment on demand by running from `argStart[i]` to its `BRK`.
+- `if` always ends its then-branch with a `BRA`; when there is no else branch it jumps to the next instruction. So
+  `if (c) {…}` and `if (c) {…} else {}` compile identically.
+- `else if` chains are nested ifs whose then-branches all jump to the same end. AI scripts are one long chain on
+  `AIFunction_GetCurrentEventType() == AIEVENT_*`.
+- No backward branch exists in any retail file: no loops. No branch occurs inside an argument (no `?:`).
+- Variables are symbols such as `EditVariable_173.nValue`, written with `ASSIGN` (`x = 2;`). AI scripts also use
+  `AIFunction_SetScript{Integer,Real}Value(slot, v)` as scratch storage.
+- Five level-4 AI scripts (`ai/540`–`544`) are just `0;` (`PUSH0 POP BRK`), presumably compiled from an empty script.
 
-| op | operand | meaning |
-|---|---|---|
-| `03` | i8 | push int |
-| `04` | i16 | push int |
-| `05` | f32 | push float |
-| `09` | u8 | push string (index) |
-| `0a` | u16 | push string (index) |
-| `0d` | u8 | identifier; followed by `18…` it is a nested call, otherwise a name such as `TRUE` |
-| `0f` / `10` | | push 0 / 1 |
-| `2c` | | negate top of stack |
+`npm run qvm -- <file>` prints a script as QSC-like source, `--asm` the raw instructions.
 
-That subset decodes every `objects.qvm`, ammo and most weapon definitions (124 of 997 scripts). AI scripts also use
-control flow (`02`, `1b` and statement forms beyond `call 12`), not yet mapped.
+Open questions:
+- Ints and floats are both plain numbers in the decoded AST, so the printer cannot show `1` vs `1.0`.
+- What `PUSHA`, `BLK` and `ILLEGAL` were for; none is emitted.
 
 ### objects.qvm
 

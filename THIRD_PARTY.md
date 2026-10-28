@@ -41,3 +41,7 @@ SOFTWARE.
 
 Format documentation for IGI's terrain files (`.ctr`, `.cmd`, `.hmp`, `.bit`, `.lmp`, terrain `.tex`) and the world
 scale (4096 units per metre), used as a cross-check for `docs/FORMATS.md`.
+
+Its QVM research (`reverse/docs/03-scripting`, `reverse/tools/qvm.py`, `reverse/tools/qvmdec.py`), drawn from
+`IGI.exe`, gives the opcode names and numbering, operand widths and interpreter semantics that `src/formats/qvm.ts`
+uses to decode compiled scripts.
