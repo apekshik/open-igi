@@ -41,5 +41,7 @@ function igiData(dir: string | undefined): Plugin {
 }
 
 export default defineConfig(({ mode }) => ({
+  // Relative asset URLs so the same build works at a domain root and under /open-igi/ on GitHub Pages.
+  base: "./",
   plugins: [igiData(loadEnv(mode, process.cwd(), "").IGI_DATA)],
 }));

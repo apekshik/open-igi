@@ -61,3 +61,7 @@ source-available).
 Read for research only; no code from it is used. Its notes on type 1 models (`docs/mef_model_types.md`: the skin
 fields and that `XTRV` holds render plus skinning-only vertices) pointed us at the extra influence records, and its bone
 names for the 33-bone rigs agree with the bone order documented in `docs/FORMATS.md`.
+
+## fflate
+
+[fflate](https://github.com/101arrowz/fflate) (MIT) inflates entries when importing a game zip.
