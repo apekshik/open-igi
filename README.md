@@ -4,6 +4,10 @@ A from-scratch web engine for *Project I.G.I.: I'm Going In* (2000), in the spir
 It runs in the browser on three.js and loads the game data from **your own copy** of the game.
 
 This repo contains no game data and no code taken from the original executable. See [docs/CLEAN_ROOM.md](docs/CLEAN_ROOM.md).
+You need your own copy of the game to play.
+
+open-igi is a free, non-commercial fan project. It is not affiliated with or endorsed by the owners of Project I.G.I.
+"Project I.G.I." and related names are trademarks of their respective owners.
 
 ## Status
 
