@@ -80,6 +80,8 @@ class AiSystem implements AiService, AiWorld {
   private doorList: Entity[] | null = null;
   private doorListTime = -Infinity;
   frameTime = 0;
+  /** The latest explosion (its damage events follow it in the same frame). */
+  private blast: { sourceId: number | null; time: number } | null = null;
   private unsubscribe: (() => void)[] = [];
   private markers = new Map<Soldier, THREE.Mesh>();
   private pending: CharacterSpec[] = [];
@@ -135,9 +137,18 @@ class AiSystem implements AiService, AiWorld {
 
     const on = game.events.on.bind(game.events);
     this.unsubscribe.push(
+      on("explosion", (x) => {
+        this.blast = { sourceId: x.sourceId, time: this.game.time };
+      }),
       on("damage", (d) => {
         // Damage arrives in IGI units with the hit zone already applied; the owner subtracts it.
-        this.byEntity(d.targetId)?.damaged(d.amount, d.part, d.sourceId, d.point, d.direction);
+        const target = this.byEntity(d.targetId);
+        if (!target) return;
+        // Soldiers' bullets do not hurt their own side (their grenades and rockets still do): see docs/formats/ai.md.
+        const source = d.sourceId !== null ? this.byEntity(d.sourceId) : undefined;
+        const blast = this.blast && this.blast.sourceId === d.sourceId && this.blast.time === this.game.time;
+        if (source && source !== target && source.team === target.team && !blast) return;
+        target.damaged(d.amount, d.part, d.sourceId, d.point, d.direction);
       }),
       on("death", (d) => {
         const s = this.byEntity(d.entityId);
@@ -364,7 +375,7 @@ class AiSystem implements AiService, AiWorld {
     if (weapons) {
       // Aim error is already in the direction; distant off-screen shooters skip their muzzle effects.
       const quiet = !this.inView(s.position) && dist(s.position, game.fromScene(game.camera.position)) > 60 * METRE;
-      weapons.fire(s.id, w.id, origin, dir, { damageScale: s.config.damageScale, spreadScale: 0.5, quiet });
+      weapons.fire(s.id, w.id, origin, dir, { damageScale: s.config.damageScale, spreadScale: w.pellets > 1 ? 1 : 0.5, quiet });
       return;
     }
     // Our own hitscan: first thing along the line within 300 m.

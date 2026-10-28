@@ -526,6 +526,28 @@ export class Soldier implements AiCharacter {
     this.world.throwGrenade(this, weapon, origin, velocity, fuse);
   }
 
+  /**
+   * Is a living comrade within a metre of the line from `from` to `to` (or just beyond it, where a miss carries on)?
+   * Soldiers hold their fire then (see docs/formats/ai.md: friendly fire).
+   */
+  comradeInLine(from: Vec3, to: Vec3): boolean {
+    const dir = vec3.sub(to, from);
+    const len = vec3.length(dir);
+    if (len <= 0) return false;
+    const u = vec3.scale(dir, 1 / len);
+    const reach = len + 3 * METRE;
+    for (const o of this.world.characters()) {
+      if (o === this || !o.alive || o.team !== this.team) continue;
+      const c: Vec3 = [o.position[0], o.position[1], o.position[2] + (o.stance === "prone" ? 0.3 : o.stance === "crouch" ? 0.7 : 1.1) * METRE];
+      const rel = vec3.sub(c, from);
+      const along = vec3.dot(rel, u);
+      if (along <= 0 || along > reach) continue;
+      const off = vec3.length(vec3.sub(rel, vec3.scale(u, along)));
+      if (off < 1 * METRE) return true;
+    }
+    return false;
+  }
+
   /** The stationary gun with this task id, if the level has it. */
   gunAt(id: number): MountedGun | undefined {
     return this.world.gun(id);
@@ -1260,6 +1282,8 @@ class CombatAction implements Action {
   private gait: "run" | "walk" = "run";
   private grenadeCooldown = 0;
   private firedSinceMove = true;
+  /** The last burst was held because the line of fire was blocked. */
+  private blocked = false;
   private throwing: { weapon: string; t: number; release: number; thrown: boolean } | null = null;
 
   update(s: Soldier, dt: number): boolean {
@@ -1374,10 +1398,17 @@ class CombatAction implements Action {
       const rounds = Math.round(w.clipSize * (c.minClipFraction + rand() * c.randomClipFraction));
       this.burstLeft = Math.max(1, Math.min(rounds, c.maxRoundsPerBurst || rounds, s.clip));
       this.shotTimer = 0;
-      this.chooseAim(s, target);
+      if (!this.chooseAim(s, target)) {
+        this.holdFire(style, true);
+        return false;
+      }
+      this.blocked = false;
     }
     if ((this.shotTimer -= dt) > 0) return false;
-    this.fire(s, target, eye, d, style === "rpg");
+    if (!this.fire(s, target, eye, d, style === "rpg")) {
+      this.holdFire(style);
+      return false;
+    }
     s.clip--;
     this.burstLeft--;
     this.shotTimer = Math.max(60 / Math.max(1, w.roundsPerMinute), c.minShotDelay + rand() * c.randomShotDelay);
@@ -1397,11 +1428,24 @@ class CombatAction implements Action {
   /** Aim at the head this burst: the chest is behind cover (a target crouched behind a low wall). */
   private aimHead = false;
 
-  private chooseAim(s: Soldier, target: Entity) {
+  /**
+   * Pick head or chest for the coming burst, and check the line of fire: sight passes glass and chain-link fences and
+   * bullets may not, so a soldier whose shots would stop in a wall, a fence or a door holds the burst (patrols move to
+   * a clear angle) instead of emptying clips into it. False when the line is blocked.
+   */
+  private chooseAim(s: Soldier, target: Entity, from: Vec3 = s.eye()): boolean {
     const physics = s.game.services.physics;
     const player = s.game.services.player;
     const head: Vec3 = player && target === player.entity ? player.eye() : [target.position[0], target.position[1], target.position[2] + target.height * 0.9];
-    this.aimHead = !!physics && !physics.lineOfSight(s.eye(), [head[0], head[1], head[2] - 0.35 * METRE]);
+    const chest: Vec3 = [head[0], head[1], head[2] - 0.35 * METRE];
+    if (!physics) return true;
+    this.aimHead = !physics.lineOfSight(s.eye(), chest);
+    const aim = this.aimHead ? head : chest;
+    const hit = physics.raycast(from, aim, { ignoreEntity: s.id });
+    if (!hit || hit.entityId === target.id) return true;
+    const e = hit.entityId !== null ? s.game.entities.get(hit.entityId) : undefined;
+    if (e instanceof Soldier) return true; // comrades are handled shot by shot
+    return hit.distance > dist(from, aim) - 0.5 * METRE;
   }
 
   /** Maybe start a grenade throw (settings.qvm's grenade probabilities and distances); true when one starts. */
@@ -1463,7 +1507,7 @@ class CombatAction implements Action {
       s.goTo(target.position, false, 10 * METRE);
       return;
     }
-    if (rand() < c.evasiveProbability) {
+    if (!this.blocked && rand() < c.evasiveProbability) {
       const left = rand() < c.evasiveStandRollSide;
       if (s.stance === "stand") {
         if (rand() < c.evasiveStandRollOrLie) s.playOnce(left ? CLIP.rollLeft : CLIP.rollRight, () => (s.stance = "crouch"));
@@ -1494,11 +1538,17 @@ class CombatAction implements Action {
       const n = pick(options);
       const from: Vec3 = [n.position[0], n.position[1], n.position[2] + 1.6 * METRE];
       const to: Vec3 = [target.position[0], target.position[1], target.position[2] + 1.4 * METRE];
-      if (physics.lineOfSight(from, to)) {
+      // A clear line of fire, not just of sight (fences and glass let sight through).
+      if (!physics.raycast(from, to, { entities: false })) {
         this.gait = rand() < 0.5 ? "run" : "walk";
         s.goTo(n.position);
         return;
       }
+    }
+    // Nowhere better close by and the shot is blocked: close in.
+    if (this.blocked) {
+      this.gait = "run";
+      s.goTo(target.position, false, 10 * METRE);
     }
   }
 
@@ -1519,13 +1569,26 @@ class CombatAction implements Action {
     return vec3.add(aim, [side[0] * off, side[1] * off, (rand() - 0.3) * 0.6 * METRE]);
   }
 
-  private fire(s: Soldier, target: Entity, eye: Vec3, d: number, rpg: boolean) {
+  private fire(s: Soldier, target: Entity, eye: Vec3, d: number, rpg: boolean): boolean {
     // From the gun's muzzle when the body is posed, else from in front of the chest.
     const facing = direction(s.yaw);
     const tip = s.posed ? s.body?.muzzle(s.game.toSceneDir(facing)) : null;
     const muzzle = tip ? s.game.fromScene(tip) : vec3.add(eye, vec3.add(vec3.scale(facing, 0.5 * METRE), [0, 0, -0.25 * METRE]));
     const point = this.aimPoint(s, target, muzzle, d, rpg);
+    if (s.comradeInLine(muzzle, point)) return false;
     s.shoot(muzzle, vec3.normalize(vec3.sub(point, muzzle)));
+    return true;
+  }
+
+  /** A comrade stands in the line of fire: hold the burst, and a patrol moves to a clear angle. */
+  private holdFire(style: CombatStyle, blocked = false) {
+    this.blocked = blocked;
+    this.burstLeft = 0;
+    this.burstDelay = 0.4 + rand() * 0.3;
+    if (style === "mobile") {
+      this.moveTimer = 0;
+      this.firedSinceMove = true;
+    }
   }
 
   /** "Gunner Combat - Stand": traverse the stationary gun onto the target and fire its weapon in bursts. */
@@ -1540,7 +1603,10 @@ class CombatAction implements Action {
     if (!s.canSee || !aligned || !gun.covers(chest)) return false;
     if (this.burstLeft === 0) {
       if ((this.burstDelay -= dt) > 0) return false;
-      this.chooseAim(s, target);
+      if (!this.chooseAim(s, target, gun.muzzle())) {
+        this.holdFire("gunner");
+        return false;
+      }
       const clip = gun.ammo >= 0 ? gun.ammo : 10000;
       const rounds = Math.round(Math.min(clip, 10000) * (c.minClipFraction + rand() * c.randomClipFraction));
       this.burstLeft = Math.max(1, Math.min(rounds, c.maxRoundsPerBurst || rounds));
@@ -1550,6 +1616,10 @@ class CombatAction implements Action {
     if ((this.shotTimer -= dt) > 0) return false;
     const muzzle = gun.muzzle();
     const point = this.aimPoint(s, target, muzzle, dist(s.position, target.position), false);
+    if (s.comradeInLine(muzzle, point)) {
+      this.holdFire("gunner");
+      return false;
+    }
     s.shootWith(gun.spec.weapon, muzzle, vec3.normalize(vec3.sub(point, muzzle)));
     if (gun.ammo > 0) gun.ammo--;
     this.burstLeft--;
