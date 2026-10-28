@@ -25,9 +25,29 @@ export interface HeightMapTask {
   id: number;
 }
 
+export interface TextureModifierTask {
+  position: [number, number, number];
+  level: number;
+  /** Terrain material painted where the bitmap is set. */
+  material: number;
+  /** Slot in terrain.bit. */
+  bitmap: number;
+  size: number;
+}
+
+export interface TerrainLightMapTask {
+  position: [number, number, number];
+  level: number;
+  size: number;
+  /** Index into terrain.lmp. */
+  index: number;
+}
+
 export interface LevelObjects {
   placements: Placement[];
   heightMaps: HeightMapTask[];
+  textureModifiers: TextureModifierTask[];
+  terrainLightMaps: TerrainLightMapTask[];
   /** Position of the HumanPlayer task, if found. */
   playerStart: [number, number, number] | null;
   /** Count of every task type in the tree, for research. */
@@ -40,6 +60,8 @@ const POSE_THEN_MODEL = new Set(["Building", "EditRigidObj"]);
 export function levelObjects(statements: QvmCall[]): LevelObjects {
   const placements: Placement[] = [];
   const heightMaps: HeightMapTask[] = [];
+  const textureModifiers: TextureModifierTask[] = [];
+  const terrainLightMaps: TerrainLightMapTask[] = [];
   const typeCounts = new Map<string, number>();
   let playerStart: [number, number, number] | null = null;
 
@@ -67,6 +89,12 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
     } else if (t === "HeightMap") {
       // HeightMap: position, level, size, isEdit, bitmap id, normal smooth, blur smooth.
       heightMaps.push({ position: [p[0], p[1], p[2]], level: p[3], size: p[4], id: p[6] });
+    } else if (t === "TextureModifier") {
+      // TextureModifier: position, level, material index, bitmap id, size, isEdit.
+      textureModifiers.push({ position: [p[0], p[1], p[2]], level: p[3], material: p[4], bitmap: p[5], size: p[6] });
+    } else if (t === "TerrainLightMap") {
+      // TerrainLightMap: position, level, size, texture index, generated when created.
+      terrainLightMaps.push({ position: [p[0], p[1], p[2]], level: p[3], size: p[4], index: p[5] });
     } else if (t === "HumanPlayer" && playerStart === null) {
       // HumanPlayer: position, gamma, model, team. Mission 1 names it "TheGoodGuy".
       playerStart = [p[0], p[1], p[2]];
@@ -76,7 +104,7 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
   }
 
   for (const s of statements) visit(s);
-  return { placements, heightMaps, playerStart, typeCounts };
+  return { placements, heightMaps, textureModifiers, terrainLightMaps, playerStart, typeCounts };
 }
 
 function isCall(v: QvmValue): v is QvmCall {

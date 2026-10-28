@@ -11,14 +11,14 @@ Reference install: the English PC release (`IGI.exe`, 1,384,448 bytes), 1,940 fi
 | ext | count | MB | magic | status | reader |
 |---|---:|---:|---|---|---|
 | .res | 92 | 274.5 | `ILFF` / `IRES` | confirmed (container) | `src/formats/ilff.ts` |
-| .wav | 394 | 47.1 | `ILSF` | unknown | |
+| .wav | 394 + 346 in archives | 47.1 | `ILSF` | confirmed (PCM and IMA ADPCM) | `src/formats/ilsf.ts` |
 | .dat | 317 | 35.2 | `0xccddeeff` / text | unknown | |
 | .tex | 26 loose + ~6,900 in archives | 7.2 | `LOOP` | v11 confirmed | `src/formats/tex.ts` |
 | .ctr / .cmd / .hmp | 14 / 14 / 6 | ~13 | none | terrain geometry confirmed | `src/formats/terrain.ts` |
-| .lmp / .bit | 14 / 14 | ~8 | none | layout known, not yet used | |
-| .iff | 6 | 5.2 | `FORM` / `BOBJ` | unknown (animations) | |
-| .qvm | 997 | 3.7 | `LOOP` (v8) | declarative subset confirmed (all objects.qvm) | `src/formats/qvm.ts` |
-| .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry confirmed | `src/formats/mef.ts` |
+| .lmp / .bit | 14 / 14 | ~8 | none | terrain lightmaps and texture masks confirmed | `src/formats/terrain.ts` |
+| .iff | 6 | 5.2 | `FORM` / `BOBJ` | skeletons confirmed, animation keys partial | `src/formats/anim.ts` |
+| .qvm | 997 | 3.7 | `LOOP` (v8) | confirmed (all 997 decode) | `src/formats/qvm.ts` |
+| .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry and type 1 skin confirmed | `src/formats/mef.ts` |
 | .olm | ~25,000 in archives | | none | unknown (per-object lightmaps) | |
 | .mtp | 17 | 0.4 | `FORM` / `MTP ` | model→texture mapping confirmed | `src/formats/mtp.ts` |
 | .fnt | 2 + in archives | | `ILFF` / `FONT` | unknown | |
@@ -87,11 +87,12 @@ disk (`HSEM` = `MESH`). Chunks in file order:
 | `CMSH`, `CVTX`, `CFCE`, `CMAT`, `CSPH` | collision mesh, vertices, faces, materials, spheres (two sets) |
 
 **Model type** (`MESH` @32): `3` static lightmapped geometry (5,616 models), `1` skinned characters (~550),
-`0` rigid movable objects (~630). Type 1 vertices are in bone space, so characters need the skeleton to look right.
+`0` rigid movable objects (~630). Type 1 vertices are in bone space, so characters need the skeleton to look right
+(see "Characters" below).
 
 **VRTX**: `vertexCount` records of 40 bytes (types 1, 3) or 32 bytes (type 0):
-`vec3 position, vec3 normal, vec2 uv` then, for 40-byte vertices, `vec2 lightmapUV` (type 3) or bone data (type 1).
-IGI is Z-up. UV v=0 is the top row of the texture.
+`vec3 position, vec3 normal, vec2 uv` then, for 40-byte vertices, `vec2 lightmapUV` (type 3) or skin data (type 1:
+`f32 weight, u16 index, u8 bone, u8 0`). IGI is Z-up. UV v=0 is the top row of the texture.
 
 **REND**: back-to-back batches, each a header followed by `indexCount` u16 triangle-list indices relative to
 `vertexStart`, with no padding.
@@ -105,6 +106,89 @@ types 0, 1 (28 bytes): vec3 centre, u16 indexCount, u16 ?, u16 material, u16 ver
 `REND` consumed exactly.
 
 Model names are `GGG_VV_L`: `L` is the LOD level (1 = most detailed, up to 5).
+
+## Characters: type 1 skin + `.iff` skeletons (bind pose confirmed, animation partial)
+
+Readers: `src/formats/mef.ts` (`skin`, `skinMef`, `skinFitError`) and `src/formats/anim.ts` (`parseAnimFile`,
+`poseBones`). Chunk sizes and the BOSH/PLST/TLST/BALH meanings come from flawme/igi-reverse-engineering; the skin
+layout, the bind-pose rule and the key layouts are our own reading (see THIRD_PARTY.md).
+
+### Skin (in the `.mef`)
+
+For type 1, `RD3D` is 56 bytes: `u32 4, triangleCount, batchCount, extraCount, renderCount, vertexCount, 0...`.
+`VRTX` holds `renderCount` render vertices followed by `extraCount` extra influence records, all 40 bytes:
+
+```
+vec3 position, vec3 normal   in the bind frame of `bone`
+vec2 uv
+f32  weight
+u16  index                   render vertex: its index within its REND batch (unused)
+                             extra record:  the model-wide render vertex it adds to
+u8   bone, u8 0
+```
+
+Each record carries one bone. A vertex weighted to several bones has its own record plus one extra record per
+additional bone (extras come in passes: all second influences, then third, then fourth). REND only references render
+vertices. Posed position = sum over a vertex's records of `weight * (boneRotation * position + boneOrigin)`; normals
+likewise without the translation.
+
+Checks, over all 537 type 1 models in every archive: RD3D counts add up, every extra targets a render vertex, every
+batch index is below `renderCount`, and the weights of each render vertex sum to 1 (0 exceptions). `ATTA` and `MVTX`
+play no part in skinning: `ATTA` is empty in every type 1 model and `MVTX` is empty in 523 of 537 (one 16-byte record in
+the rest).
+
+### `.iff` (common/anims/NNN.iff)
+
+EA IFF 85: big-endian chunk sizes, little-endian payloads, chunks padded to even length. The `FORM` sizes do not
+nest (BOBJ's size covers only the skeleton, and the last BOAN runs past the end of BOAL), so the reader walks the
+file as a flat stream of chunks and treats each `BOAH` as the start of an animation.
+
+```
+FORM BOBJ
+  FORM BOBH
+    BOSH  u32 hierarchy, u32 boneCount         hierarchy = the file number (000.iff → 0)
+    PLST  i32 parent[boneCount]                -1 for the root; parents always precede children
+    TLST  vec3 offset[boneCount]               bone origin relative to its parent, in the parent's frame
+  FORM BOAL
+    BALH  u32 animationCount, u32 ?            animationCount matches the BOAN count in all 6 files
+    FORM BOAN  (per animation)
+      BOAH  f32 duration, u32 flags, u32 id    flags bit 31 set on the walk/run cycles (looping?); id = animation number
+      BOTH  u32 n
+      BOTD  n x { vec3 rootPosition, f32 time, vec3 ?, vec3 ? }       root track (the trailing vec3s look like tangents)
+      BORH  u32 n                                                      } once per bone, in bone order
+      BORD  n x { quat (x, y, z, w), f32 time, quat ?, quat ? }        } rotation relative to the parent
+      BOEH  u32 n;  BOED  event data (not decoded)
+```
+
+| file | bones | animations | used by |
+|---|---:|---:|---|
+| 000.iff | 33 | 122 | Jones (`000_*`) |
+| 001.iff, 002.iff, 003.iff | 33 | 95, 18, 47 | soldiers; the three share one skeleton |
+| 005.iff | 56 | 78 | first-person arms (`005_01_1`), with finger bones |
+| 006.iff | 33 | 16 | Anya and the heavier build (`012_*`, `015_*`) |
+
+Bone order for the 33-bone rigs: 0 root/pelvis, 1-3 spine, 4-7 neck and head, 8-13 left arm to fingers, 14-19 right
+arm, 20-22 a chain in front of the chest (likely the weapon), 23-27 left leg to toe, 28-32 right leg.
+X is the character's right, Y forward, Z up. The root sits about 4,000 units (1 m) above the feet.
+
+**Bind pose (confirmed).** Rest rotations are identity: a bone's model-space origin is the sum of TLST offsets down
+the hierarchy, and a record's bind position is `position + origin(bone)`. Proof: every extra record must land on the
+same point as the render vertex it adds to. With the right skeleton the largest mismatch is under 1 unit for most
+models and at most ~60 units (1.5 cm) for the rest; wrong skeletons give hundreds. 006_01 and 008_01 fit best at 129
+and 242 units but still look right; 005_01_1 (arms) fits 005.iff at 731, so its bind frame is less certain.
+
+**Which skeleton.** In game the placement picks it: `HumanSoldier(..., Model, Team, Bone Heirachy, Stand Animation,
+...)` in objects.qvm, with Bone Heirachy 0 for Jones, 1 for soldiers and 6 for Anya, which matches the best-fitting
+skeleton. A model can be driven by another skeleton (Jones's mesh appears with hierarchy 1), since vertices are
+bone-relative. The model viewer has no placement, so it uses the best-fitting skeleton.
+
+**Animation (partial).** Local bone transform = translate(TLST offset, plus the BOTD root position for bone 0) ·
+rotate(BORD quaternion); model = parent · local. Sampling slerps between bracketing rotation keys and lerps the root
+position, with time in what looks like milliseconds. Animation 0 of 000.iff is a relaxed standing pose, and the
+walk/run cycles of 001.iff play convincingly. Not decoded: the second and third quaternions in BORD (equal to the
+first in single-key tracks; the game's sampler interpolates with SLERP and precomputes per-key angles, so they may be
+spline controls), the BOTD tangents, BOAH flags beyond bit 31, BALH[1], the BOED events, and how "Stand Animation"
+ids map to BOAH ids.
 
 ## .mtp material table (model→texture confirmed)
 
@@ -122,54 +206,95 @@ Big-endian IFF `FORM` of type `MTP ` (sizes big-endian, payloads little-endian, 
 A model's material slot `i` uses texture `TEXF[INST.texIndex[i]]`. In all 14 levels, the records are sequential,
 `n` equals the model's material count, every index is in range, and the records consume `INST` exactly.
 
-## ILSF sound (partial)
+## .qvm compiled script (confirmed)
 
-```
-0  "ILSF"
-4  u16 codec?       1 in common/sounds, 2 in mission dialogue (payload of 2 does not look like PCM)
-6  u16 bits         16
-8  u32 channels     1
-12 u32 sampleRate   22050
-16 u32 dataSize
-20 data
-```
-
-## .qvm compiled script (declarative subset confirmed)
-
-`LOOP` version 8. Compiled from QSC source. Header (all u32):
+`LOOP` version 8. Compiled from QSC source (the `.qsc` files are not shipped). `src/formats/qvm.ts` decodes all 997
+scripts in the install (`npm run qvm -- <install dir>` prints decoded/total). Opcode names, numbering and the
+interpreter behaviour below come from flawme/igi-reverse-engineering (`reverse/docs/03-scripting`, from `IGI.exe`); the
+statement patterns and the decoder's strict checks are ours. Header (all u32):
 
 | offset | field |
 |---|---|
 | 0x04 | version (8) |
-| 0x08 | unknown (5) |
-| 0x0C, 0x10 | identifier offset table, identifier string pool (function names and constants like `TRUE`) |
+| 0x08 | section count (5) |
+| 0x0C, 0x10 | identifier offset table, identifier string pool (function names, constants like `TRUE`, variables) |
 | 0x14, 0x18 | identifier table size (4 per entry), pool size |
 | 0x1C, 0x20 | string offset table, string pool |
 | 0x24, 0x28 | string table size, pool size |
 | 0x2C, 0x30 | bytecode offset, bytecode size (ends exactly at end of file) |
+| 0x34, 0x38 | value-stack and type-stack sizes; 0 in every file (engine defaults 0x800 / 0x100) |
 
-Bytecode is a list of statements, each a call followed by `12`, with a final `00`:
+The sections tile the file in order from 0x3C.
+
+### Instructions
+
+A stack machine. Each instruction is a one-byte opcode with a fixed-width operand (except `PUSHS`/`PUSHI` and `CALL`).
+Branch targets are relative to the end of the branch instruction. All offsets are relative to the start of the code.
+`IGI.exe` names opcodes from a 49-entry table stored in reverse order (opcode = 48 − index).
+
+Confidence: **seen** = emitted by the retail compiler and decoded strictly over all 997 files (count in brackets);
+**exe** = never emitted, but its handler and operand width are known from `IGI.exe`; **inferred** = never emitted,
+named from the exe's table only, assumed operand-less.
+
+| op | name | operand | meaning | confidence |
+|---|---|---|---|---|
+| `00` | BRK | | end of an argument fragment or of the script (sets the VM's break flag) | seen (374,345) |
+| `01` | NOP | | no-op | inferred |
+| `02` | PUSH | i32 | push int | seen (8, `humanplayer.qvm`) |
+| `03` | PUSHB | i8 | push int | seen (40,286) |
+| `04` | PUSHW | i16 | push int | seen (10,346) |
+| `05` | PUSHF | f32 | push float | seen (74,191) |
+| `06` | PUSHA | i32 | push "address" (type tag 5; nothing consumes it) | exe |
+| `07` | PUSHS | inline C string | push string literal | exe |
+| `08` / `09` / `0a` | PUSHSI / PUSHSIB / PUSHSIW | u32 / u8 / u16 | push string from the string table | `09`, `0a` seen (32,754 / 56,356); `08` exe |
+| `0b` | PUSHI | inline C string | push symbol by name | exe |
+| `0c` / `0d` / `0e` | PUSHII / PUSHIIB / PUSHIIW | u32 / u8 / u16 | push symbol from the identifier table | `0d` seen (54,260); `0c`, `0e` exe |
+| `0f` / `10` / `11` | PUSH0 / PUSH1 / PUSHM | | push 0 / 1 / −1 | `0f`, `10` seen (59,821 / 59,761); `11` exe |
+| `12` | POP | | discard top of stack; ends an expression statement | seen (6,838) |
+| `13` | RET | | halts with "illegal instruction" | exe |
+| `14` | BRA | i32 | jump | seen (37,966) |
+| `15` | BF | i32 | pop; jump if false | seen (3,748) |
+| `16` | BT | i32 | pop; jump if true | exe |
+| `17` | JSR | | halts with "illegal instruction" | exe |
+| `18` | CALL | u32 n, u32 argStart[n] | pop symbol, call native function, push result | seen (34,218) |
+| `19`–`29` | ADD SUB MUL DIV SHL SHR AND OR XOR LAND LOR EQ NE LT LE GT GE | | pop b, pop a, push `a op b` (C operators; comparisons push 0/1) | seen: ADD 4, MUL 25, LAND 42, LOR 1, EQ 3,630, NE 42, LT 29, GT 30; others exe (one shared ALU handler) |
+| `2a` | ASSIGN | | pop value, pop variable symbol, store, push value | seen (46) |
+| `2b` | PLUS | | unary + | inferred |
+| `2c` | MINUS | | negate | seen (39,028) |
+| `2d` | INV | | bitwise not `~` | inferred |
+| `2e` | NOT | | logical not `!` | seen (15) |
+| `2f`, `30` | BLK, ILLEGAL | | unknown | inferred |
+
+25 opcodes appear in the retail data. `LAND`/`LOR` are plain binary ops: the compiler does not short-circuit.
+
+### Statement patterns
+
+The retail compiler's output is regular, and `decodeQvmScript` accepts only these shapes (every byte accounted for once):
 
 ```
-call    := 0d u8:ident  18 u32:n  u32:argStart[n]  14 u32:argBytes  arg[n]
-arg     := expr* 00
+script  := stmt* 00
+stmt    := expr 12                                         expression statement, value discarded
+         | expr 15:else  stmt*  14:end  else: stmt*  end:   if (expr) {…} else {…}
+call    := 0d:fn 18 n argStart[n]  14:end  arg[0] … arg[n-1]  end:
+arg     := expr 00
 ```
 
-`argStart` is relative to the start of the bytecode. Argument expressions are tiny stack programs:
+- A call pushes its callee, then `CALL`; the inline argument fragments follow a `BRA` that skips them. The native
+  function evaluates each fragment on demand by running from `argStart[i]` to its `BRK`.
+- `if` always ends its then-branch with a `BRA`; when there is no else branch it jumps to the next instruction. So
+  `if (c) {…}` and `if (c) {…} else {}` compile identically.
+- `else if` chains are nested ifs whose then-branches all jump to the same end. AI scripts are one long chain on
+  `AIFunction_GetCurrentEventType() == AIEVENT_*`.
+- No backward branch exists in any retail file: no loops. No branch occurs inside an argument (no `?:`).
+- Variables are symbols such as `EditVariable_173.nValue`, written with `ASSIGN` (`x = 2;`). AI scripts also use
+  `AIFunction_SetScript{Integer,Real}Value(slot, v)` as scratch storage.
+- Five level-4 AI scripts (`ai/540`–`544`) are just `0;` (`PUSH0 POP BRK`), presumably compiled from an empty script.
 
-| op | operand | meaning |
-|---|---|---|
-| `03` | i8 | push int |
-| `04` | i16 | push int |
-| `05` | f32 | push float |
-| `09` | u8 | push string (index) |
-| `0a` | u16 | push string (index) |
-| `0d` | u8 | identifier; followed by `18…` it is a nested call, otherwise a name such as `TRUE` |
-| `0f` / `10` | | push 0 / 1 |
-| `2c` | | negate top of stack |
+`npm run qvm -- <file>` prints a script as QSC-like source, `--asm` the raw instructions.
 
-That subset decodes every `objects.qvm`, ammo and most weapon definitions (124 of 997 scripts). AI scripts also use
-control flow (`02`, `1b` and statement forms beyond `call 12`), not yet mapped.
+Open questions:
+- Ints and floats are both plain numbers in the decoded AST, so the printer cannot show `1` vs `1.0`.
+- What `PUSHA`, `BLK` and `ILLEGAL` were for; none is emitted.
 
 ### objects.qvm
 
@@ -229,9 +354,34 @@ it add `(bilinear(h) - 64) * 256` to their vertex heights.
 **Check:** with patches applied, Mission 1's 400 placed objects sit a median 0.00 m above the decoded ground
 (10th–90th percentile: -0.5 m to +2.3 m).
 
-Not yet used: `.lmp` (8-bit lightmaps: repeated `u32 size, u8[size²]`), `terrain.tex` (LOOP v9, 18 textures of
-128×128 ARGB1555), `.bit` (texture-modifier bitmaps, same slot table as `.hmp` but 1 bit per cell), and
-`terrain.qvm` (`CreateTerrainMaterial` and tile-map tables).
+**Level of detail.** A cube at level L is drawn (instead of its children) once its face distance (Chebyshev,
+view to nearest face) reaches `163 * 2^(25-L)`; leaves (L=16) are always drawn. Within a cube, each child vertex
+(the `.cmd` vertices after the parent ones; low 6 bits = its parent vertex) slides onto its parent vertex by
+`factor = clamp(d / (2^(25-L) * 99) - 227/99, 0, 1)`, where d is its parent vertex's Chebyshev distance to the view.
+That closes cracks between neighbouring cubes at different levels. open-igi divides distances by a `detail`
+multiplier (default 4; `?detail=1` matches the game).
+
+### Texturing
+
+| file / task | contents |
+|---|---|
+| `terrain.tex` | LOOP v9: 18 images, 128×128 ARGB1555 (52-byte header, 32-byte image descriptors) |
+| `terrain.qvm` | `CreateTerrainMaterial(m, id, 32 × {bool, v1, v2, freq2, tileMap2, freq1, tileMap1})` per material and octree level; `CreateTerrainTileMap(g, 64 texture indices)` (8×8) |
+| `.bit` | same 256-slot table as `.hmp`; each slot a size×size 1-bit mask |
+| `TextureModifier` task | x, y, z, level, material, bitmap slot, size, isEdit: paints `material` where the mask is set, over the level-`level` cube containing the position |
+| `.lmp` | back-to-back `u32 size, u8[size²]` greyscale lightmaps (268 in Mission 1) |
+| `TerrainLightMap` task | x, y, z, level, size, lmp index, generated: lightmap spanning the level-`level` cube |
+
+Per vertex, the material is the first modifier (innermost cube first, at most four; within one cube, the first in
+script order) whose mask bit is set at the vertex, else material 0. Each material present in a cube draws two
+textures: near (`tex1`, frequency `freq1`/2) and far (`tex2`), each chosen from its 8×8 tile map by
+`((int)(freq * cubeCentre) >> (22-L or 23-L) & 0x7ff) >> 8`. UVs are planar in x/y; vertices with projection
+bits (bits 8–9 for tex1, 6–7 for tex2) map v to height instead, for cliffs. Near and far textures cross-fade with the
+morph factor, and child vertices blend between their own and their parent's material.
+
+The original draws three passes: the first material's near texture opaque, every other layer additively with
+per-vertex weights summing to 1, then the lightmap multiplied in as `1/3 + 2/3 × lightmap`. Texture rows are
+stored top-down with v=0 at the first row, for both ground textures and lightmaps.
 
 ## ILSF (sounds)
 
