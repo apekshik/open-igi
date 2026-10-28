@@ -111,6 +111,9 @@ interface Action {
 /** Events that mean the character knows there is an enemy about. */
 const THREAT = /GUNSHOT|DAMAGE|EXPLOSION|GRENADE|FLASHBANG|ENEMY|ALERT|COMBAT/;
 
+/** Shortest pause between combat moves, seconds, whatever the config says. */
+const MIN_MOVE_DELAY = 1;
+
 const rand = Math.random;
 const pick = <T>(list: readonly T[]) => list[Math.floor(rand() * list.length)];
 const yawTo = (from: Vec3, to: Vec3) => Math.atan2(-(to[0] - from[0]), to[1] - from[1]);
@@ -1081,7 +1084,9 @@ class CombatAction implements Action {
 
     // Movement: close in on a hidden or distant target, or dodge.
     if (!s.busyAnimating && !s.moving && (this.moveTimer -= dt) <= 0 && this.burstLeft === 0) {
-      this.moveTimer = c.moveDelay * (0.5 + rand());
+      // settings.qvm gives AITYPE_SPETNAZ_PATROL_AK at GD_2 (level13's surface guards) a move delay of 0: with no floor
+      // they picked a new move or evasive roll every free frame and never fired.
+      this.moveTimer = Math.max(MIN_MOVE_DELAY, c.moveDelay * (0.5 + rand()));
       this.decideMove(s, target, d);
     }
     if (s.moving) {
