@@ -196,6 +196,7 @@ export class IgiPhysics implements PhysicsService {
       model,
       setMatrix: (m) => body.setMatrix(m),
       carve: (m) => world.carve(body, m ?? body.matrix),
+      overlaps: (feet, radius, height) => body.enabled && world.pushOut(body, feet, radius, height, [0, 0]) !== null,
       setPose: (position, rotation) => body.setMatrix(placementMatrix({ type: "", name: "", id: -1, model, position, rotation }, origin)),
       get enabled() {
         return body.enabled;

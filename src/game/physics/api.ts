@@ -66,6 +66,8 @@ export interface DynamicCollider {
    * closed door leaf in their own collision where a Door object sits. Returns how many triangles were dropped.
    */
   carve(matrix?: ArrayLike<number>): number;
+  /** Does a character capsule (feet absolute) overlap the collider where it is now (above its step height)? */
+  overlaps(feet: Vec3, radius: number, height: number): boolean;
   /** Entity reported as hit by rays against this collider (doors, vehicles), or null. */
   entityId: number | null;
   remove(): void;
