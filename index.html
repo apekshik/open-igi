@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>open-igi</title>
+    <style>
+      :root { color-scheme: dark; font: 13px/1.4 ui-monospace, Consolas, monospace; }
+      body { margin: 0; background: #111; color: #ccc; }
+      header { padding: 12px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid #222; }
+      h1 { font-size: 14px; margin: 0; color: #fff; }
+      #status { color: #8a8; }
+      #grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px; }
+      figure { margin: 0; display: flex; flex-direction: column; gap: 4px; align-items: center; }
+      figure canvas { image-rendering: pixelated; background: repeating-conic-gradient(#222 0 25%, #2a2a2a 0 50%) 0 0 / 16px 16px; max-width: 128px; max-height: 128px; }
+      figcaption { font-size: 10px; color: #777; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>open-igi · texture viewer</h1>
+      <label>Game folder <input id="pick" type="file" webkitdirectory /></label>
+      <select id="archive"></select>
+      <span id="status"></span>
+    </header>
+    <div id="grid"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

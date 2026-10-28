@@ -1,0 +1,23 @@
+node_modules/
+dist/
+
+# Game data never enters the repo. Keep extracted files in game-data/ (or anywhere outside the repo).
+game-data/
+*.iso
+*.mdf
+*.mds
+*.bin
+*.cue
+*.res
+*.qvm
+*.mef
+*.tex
+*.spr
+*.exe
+*.dll
+
+# Local analysis output (inventories, chunk dumps) may quote game data.
+out/
+
+# Local machine settings (IGI_DATA path).
+.env.local
