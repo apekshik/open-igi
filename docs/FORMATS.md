@@ -17,9 +17,9 @@ Reference install: the English PC release (`IGI.exe`, 1,384,448 bytes), 1,940 fi
 | .lmp / .cmd / .ctr / .hmp / .bit | 14 / 14 / 14 / 6 / 14 | ~21 | none | unknown (terrain set, one per level) | |
 | .iff | 6 | 5.2 | `FORM` / `BOBJ` | unknown (animations) | |
 | .qvm | 997 | 3.7 | `LOOP` (v8) | unknown (compiled script) | |
-| .mef | ~6,900 in archives | | `ILFF` / `OCEM` | unknown (models) | |
+| .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry confirmed | `src/formats/mef.ts` |
 | .olm | ~25,000 in archives | | none | unknown (per-object lightmaps) | |
-| .mtp | 17 | 0.4 | `FORM` / `MTP ` | unknown (material table?) | |
+| .mtp | 17 | 0.4 | `FORM` / `MTP ` | model→texture mapping confirmed | `src/formats/mtp.ts` |
 | .fnt | 2 + in archives | | `ILFF` / `FONT` | unknown | |
 | .avi | 5 | 2.4 | `RIFF` | standard AVI | browser / ffmpeg |
 
@@ -68,6 +68,58 @@ Open questions:
 
 Sizes check out exactly: format 2 is `32 + w*h*2`; format 67 is `32 + 4 * sum(mip sizes)`.
 ARGB8888 is stored as B, G, R, A bytes. Filenames of 32-bit textures end in `_argb8888`.
+
+## .mef model (render geometry confirmed)
+
+ILFF with form type `MECO`. Chunk tags, like the form type, are little-endian u32s, so they read reversed on
+disk (`HSEM` = `MESH`). Chunks in file order:
+
+| tag | meaning (best guess unless noted) |
+|---|---|
+| `MESH` | 156-byte header. u32 @32 = model type (confirmed); u32 @96 = triangle count, u32 @100 = vertex count (confirmed); bounding spheres at @48.. |
+| `ATTA` | attachment points |
+| `MVTX`, `PORT`, `PTVX`, `PTFC` | portal / visibility data |
+| `RD3D` | render header (48 or 56 bytes) |
+| `REND` | draw batches (confirmed, below) |
+| `VRTX` | vertices (confirmed, below) |
+| `LTMP` | lightmap reference (type 3) |
+| `CMSH`, `CVTX`, `CFCE`, `CMAT`, `CSPH` | collision mesh, vertices, faces, materials, spheres (two sets) |
+
+**Model type** (`MESH` @32): `3` static lightmapped geometry (5,616 models), `1` skinned characters (~550),
+`0` rigid movable objects (~630). Type 1 vertices are in bone space, so characters need the skeleton to look right.
+
+**VRTX**: `vertexCount` records of 40 bytes (types 1, 3) or 32 bytes (type 0):
+`vec3 position, vec3 normal, vec2 uv` then, for 40-byte vertices, `vec2 lightmapUV` (type 3) or bone data (type 1).
+IGI is Z-up. UV v=0 is the top row of the texture.
+
+**REND**: back-to-back batches, each a header followed by `indexCount` u16 triangle-list indices relative to
+`vertexStart`, with no padding.
+
+```
+type 3 (32 bytes):     vec3 centre, u16 indexCount, u16 ?, u16 material, u16 ?, u16 vertexStart, u16 vertexCount, u8[8]
+types 0, 1 (28 bytes): vec3 centre, u16 indexCount, u16 ?, u16 material, u16 vertexStart, u16 vertexCount, u8[6]
+```
+
+`material` 0xFFFF means untextured. All 6,794 models in the 14 levels parse with every batch in bounds and
+`REND` consumed exactly.
+
+Model names are `GGG_VV_L`: `L` is the LOD level (1 = most detailed, up to 5).
+
+## .mtp material table (model→texture confirmed)
+
+Big-endian IFF `FORM` of type `MTP ` (sizes big-endian, payloads little-endian, chunks padded to even length).
+
+| chunk | contents |
+|---|---|
+| `MODS` | u32 count, then NUL-terminated model names, matching the level's models archive |
+| `VNAM` | u32 count, then one u32 per model; not offsets into `INST` (meaning unknown) |
+| `INST` | one record per model in `MODS` order: `u32 modelIndex, u32 n, u32 texIndex[n]` |
+| `TEXF` | u32 count, then NUL-terminated texture names, same order as the level's textures archive |
+| `GTT ` | u32 count, then `(u32 index, i32 -1)` pairs; identity so far |
+| `BANM`, `SNDS`, `SVOL`, `PALF` | empty in level 1 |
+
+A model's material slot `i` uses texture `TEXF[INST.texIndex[i]]`. In all 14 levels, the records are sequential,
+`n` equals the model's material count, every index is in range, and the records consume `INST` exactly.
 
 ## ILSF sound (partial)
 

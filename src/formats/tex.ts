@@ -14,7 +14,7 @@ export interface Texture {
   height: number;
   format: number;
   /** Mip 0 as RGBA8, row-major from the top-left. */
-  rgba: Uint8Array;
+  rgba: Uint8Array<ArrayBuffer>;
 }
 
 const HEADER = 32;

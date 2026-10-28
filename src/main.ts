@@ -1,50 +1,39 @@
-// Milestone 0: browse every texture archive in the player's install, to validate the ILFF and .tex readers.
-import { readRes } from "./formats/ilff.ts";
-import { decodeTex } from "./formats/tex.ts";
+// Research viewers over the player's install: ?view=models (default) or ?view=textures.
 import { vfsFromDevServer, vfsFromFiles, type Vfs } from "./vfs/vfs.ts";
+import { modelViewer } from "./viewer/models.ts";
+import { textureViewer } from "./viewer/textures.ts";
 
 const pick = document.querySelector<HTMLInputElement>("#pick")!;
-const select = document.querySelector<HTMLSelectElement>("#archive")!;
-const status = document.querySelector<HTMLSpanElement>("#status")!;
-const grid = document.querySelector<HTMLDivElement>("#grid")!;
+const toolbar = document.querySelector<HTMLDivElement>("#tools")!;
+const stage = document.querySelector<HTMLDivElement>("#stage")!;
+const statusEl = document.querySelector<HTMLSpanElement>("#status")!;
+const viewSelect = document.querySelector<HTMLSelectElement>("#view")!;
 
+const status = (s: string) => (statusEl.textContent = s);
 let vfs: Vfs | null = null;
 
-async function useVfs(v: Vfs) {
-  vfs = v;
-  const archives = v.list().filter((p) => p.endsWith(".res") && p.includes("textures"));
-  select.replaceChildren(...archives.sort().map((p) => new Option(p, p)));
-  status.textContent = `${v.list().length} files, ${archives.length} texture archives`;
-  if (archives.length) await show(archives[0]);
-}
-
-async function show(path: string) {
+function start() {
   if (!vfs) return;
-  grid.replaceChildren();
-  const entries = readRes(await vfs.read(path));
-  let failed = 0;
-  for (const e of entries) {
-    try {
-      const tex = decodeTex(e.data);
-      const canvas = document.createElement("canvas");
-      canvas.width = tex.width;
-      canvas.height = tex.height;
-      const img = new ImageData(new Uint8ClampedArray(tex.rgba), tex.width, tex.height);
-      canvas.getContext("2d")!.putImageData(img, 0, 0);
-      const fig = document.createElement("figure");
-      const cap = document.createElement("figcaption");
-      cap.textContent = `${e.name.split("/").pop()} ${tex.width}×${tex.height} f${tex.format}`;
-      fig.append(canvas, cap);
-      grid.append(fig);
-    } catch (err) {
-      failed++;
-      console.warn(e.name, err);
-    }
-  }
-  status.textContent = `${path}: ${entries.length - failed}/${entries.length} decoded`;
+  toolbar.replaceChildren();
+  stage.replaceChildren();
+  const view = viewSelect.value;
+  if (view === "textures") textureViewer(vfs, toolbar, stage, status);
+  else modelViewer(vfs, toolbar, stage, status);
 }
 
-pick.addEventListener("change", () => pick.files && useVfs(vfsFromFiles(pick.files)));
-select.addEventListener("change", () => show(select.value));
+viewSelect.value = new URLSearchParams(location.search).get("view") ?? "models";
+viewSelect.addEventListener("change", () => {
+  history.replaceState(null, "", `?view=${viewSelect.value}`);
+  start();
+});
+pick.addEventListener("change", () => {
+  if (!pick.files) return;
+  vfs = vfsFromFiles(pick.files);
+  start();
+});
 
-vfsFromDevServer().then((v) => v && useVfs(v));
+vfsFromDevServer().then((v) => {
+  if (!v) return status("Pick your IGI install folder (the one with IGI.exe).");
+  vfs = v;
+  start();
+});
