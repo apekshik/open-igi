@@ -387,6 +387,9 @@ class Arsenal implements WeaponsService {
    */
   private zone(target: Entity, part?: string): number {
     if (target.id === this.playerId) return 1;
+    // Only characters have hit zones. Physics names the top of any capsule "head", so without this a round on the
+    // upper half of a computer or fuel tank did 100x damage.
+    if (target.kind !== "soldier" && target.kind !== "civilian") return 1;
     return AI_ZONES[part ?? "torso"] ?? 1;
   }
 
@@ -976,7 +979,8 @@ class Arsenal implements WeaponsService {
     const look = game.input.look();
     vm.update(dt, game.camera, { moving: this.moving, lookYaw: look.yaw, lookPitch: look.pitch });
     const player = game.services.player;
-    if (player && (player.thirdPerson || player.dead)) vm.root.visible = false;
+    // No gun in front of a scripted cutscene camera.
+    if ((player && (player.thirdPerson || player.dead)) || game.services.mission?.cutscene()) vm.root.visible = false;
   }
 }
 
