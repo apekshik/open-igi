@@ -22,6 +22,10 @@ const KIND: [new (...a: never[]) => ObjectTask, string][] = [
   [ElevatorTask, "elevator"],
 ];
 
+const METRE = 4096;
+/** How close (feet to door centre, horizontally) a walking soldier opens a door. */
+const DOOR_REACH = 1.4 * METRE;
+
 /** Attached parts that spin: helicopter rotor hubs and tail rotors (rad/s about their own axis). */
 const SPINNING: Record<string, { axis: "x" | "y" | "z"; speed: number }> = {
   "711_01_1": { axis: "z", speed: 30 },
@@ -95,6 +99,37 @@ export class MissionObjects {
   /** Per-frame: model swaps, door/elevator/camera/vehicle transforms, visibility. */
   update(dt = 0) {
     for (const v of this.visuals) this.sync(v, dt);
+    this.soldiersOpenDoors();
+  }
+
+  /** Where each soldier was last frame, to tell which way it is walking. */
+  private lastSoldierPositions = new Map<number, Vec3>();
+
+  /**
+   * AI soldiers open closed, unlocked doors they walk into: IGI's AI graphs put NODECRITERIA_DOOR nodes in doorways
+   * and guards path straight through them (scripts get AIEVENT_DOOR from the door's sound). A soldier within reach of
+   * a door's centre and moving towards it uses it like the player's F key.
+   */
+  private soldiersOpenDoors() {
+    const last = this.lastSoldierPositions;
+    for (const e of this.game.entities.all()) {
+      if (e.kind !== "soldier" || !e.alive) continue;
+      const before = last.get(e.id);
+      last.set(e.id, [...e.position]);
+      if (!before) continue;
+      const mx = e.position[0] - before[0];
+      const my = e.position[1] - before[1];
+      if (Math.hypot(mx, my) < 0.005 * METRE) continue;
+      for (const v of this.visuals) {
+        const t = v.task;
+        if (!(t instanceof DoorTask) || !t.active || t.open > 0 || t.moving > 0 || t.isLocked()) continue;
+        const c = t.centerPosition();
+        const dx = c[0] - e.position[0];
+        const dy = c[1] - e.position[1];
+        if (c[2] < e.position[2] || c[2] > e.position[2] + 2.5 * METRE || Math.hypot(dx, dy) > DOOR_REACH || dx * mx + dy * my <= 0) continue;
+        t.use();
+      }
+    }
   }
 
   /**

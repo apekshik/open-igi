@@ -59,7 +59,6 @@ export function missionSystem(): GameSystem {
       );
       for (const e of logic.errors) console.warn(`[mission] ${e}`);
       objects = new MissionObjects(game, logic);
-      (globalThis as Record<string, unknown>).__logic = logic; // DEBUG
 
       // Sounds: the audio system resolves level sound conditions (ConditionalSound, AmbientArea containers) against
       // our task state; object sounds come from the objects.qvm parameters (SoundDef names).
