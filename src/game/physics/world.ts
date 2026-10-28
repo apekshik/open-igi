@@ -40,6 +40,8 @@ export interface StaticObjectInput {
   collision: ModelCollision;
   /** Column-major 4x4 (three.js `Matrix4.elements` layout): model space → origin-relative IGI space. */
   matrix: ArrayLike<number>;
+  /** ConditionalContainer ids the object exists under (Placement.gates); see setObjectEnabled. */
+  gates?: number[];
 }
 
 export interface WorldOptions {
@@ -166,7 +168,10 @@ export class CollisionWorld {
     let n = 0;
     let hitTriangles = 0;
     let hullTriangles = 0;
+    const ranges = new Uint32Array(options.objects.length * 2);
     options.objects.forEach((o, index) => {
+      ranges[index * 2] = n;
+      ranges[index * 2 + 1] = n;
       // Skinned models' collision is bone-relative; they are characters, not static geometry.
       if (o.collision.modelType === 1) {
         skipped++;
@@ -211,9 +216,25 @@ export class CollisionWorld {
           n++;
         }
       }
+      ranges[index * 2 + 1] = n;
     });
+    this.ranges = ranges;
+    this.flags = flags.slice();
     this.bvh = new TriangleBvh({ positions, materials, flags, objects });
     this.stats = { objects: options.objects.length - skipped, hitTriangles, hullTriangles, skipped };
+  }
+
+  /** Triangle range [start, end) of each object in the soup, and every triangle's original flags. */
+  private ranges: Uint32Array;
+  private flags: Uint8Array;
+
+  /**
+   * Take an object out of (or back into) every query, e.g. while the ConditionalContainer it sits in is not running.
+   * Its triangles stay in the BVH with their query flags cleared.
+   */
+  setObjectEnabled(index: number, enabled: boolean) {
+    const soup = this.bvh.soup.flags;
+    for (let t = this.ranges[index * 2], end = this.ranges[index * 2 + 1]; t < end; t++) soup[t] = enabled ? this.flags[t] : 0;
   }
 
   materialName(id: number): string | undefined {

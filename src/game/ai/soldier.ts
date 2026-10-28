@@ -128,6 +128,8 @@ const rand = Math.random;
 const pick = <T>(list: readonly T[]) => list[Math.floor(rand() * list.length)];
 const yawTo = (from: Vec3, to: Vec3) => Math.atan2(-(to[0] - from[0]), to[1] - from[1]);
 const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+/** Characters already alerted by the shout being relayed right now (see Soldier.shout). */
+let shoutWave: Set<Soldier> | null = null;
 
 export class Soldier implements AiCharacter {
   readonly id!: number;
@@ -292,31 +294,25 @@ export class Soldier implements AiCharacter {
   }
 
   private runScripts(queued: Action[]) {
+    // Level scripts branch on mission state ("if (EditVariable_752.nValue == 1) AIAction_Patrol(711, ...)": level4's
+    // friendly team advances that way); without this every task field read 0.
+    const mission = this.game.services.mission;
+    const scriptVariable = (name: string): ScriptValue => mission?.evaluate(name) ?? 0;
     const level = this.world.script(this.aiId);
     const common = this.world.commonScript(this.aiType);
-    const natives = this.natives(queued, common);
-    // Level scripts may test mission state directly, e.g. level 8's `else if (AreaActivate_481.nActive)`.
-    const variable = (name: string) => {
-      const mission = this.game.services.mission;
-      if (!mission || !name.includes(".")) return 0;
-      try {
-        return mission.evaluate(name);
-      } catch {
-        return 0;
-      }
-    };
-    if (level) runScript(level, natives, variable);
-    else if (common) runScript(common, natives, variable);
+    const natives = this.natives(queued, common, scriptVariable);
+    if (level) runScript(level, natives, scriptVariable);
+    else if (common) runScript(common, natives, scriptVariable);
     else natives.AIFunction_DefaultHandler();
   }
 
   /** The engine side of the scripts: AIFunction_* queries/settings and AIAction_* actions. */
-  private natives(queued: Action[], common: QvmScript | null): ScriptNatives {
+  private natives(queued: Action[], common: QvmScript | null, variable: (name: string) => ScriptValue): ScriptNatives {
     const n = (v: ScriptValue | undefined) => (typeof v === "number" ? v : 0);
     const natives: ScriptNatives = {
       AIFunction_GetCurrentEventType: () => this.event,
       AIFunction_DefaultHandler: () => {
-        if (common) runScript(common, natives);
+        if (common) runScript(common, natives, variable);
         else if (this.event === "AIEVENT_IDLE") queued.push(idle(2));
         else if (this.event === "AIEVENT_DEAD") queued.push(dead());
         else if (/ENEMYDETECTION|GUNSHOT|TAKINGDAMAGE|ALERT/.test(this.event)) this.pendingCombat = true;
@@ -394,17 +390,29 @@ export class Soldier implements AiCharacter {
     return natives;
   }
 
-  /** Tell nearby comrades (AIEVENT_ALERT) where the enemy is. */
+  /**
+   * Tell nearby comrades (AIEVENT_ALERT) where the enemy is. An alerted guard's script answers with
+   * AIFunction_SendResponse, which shouts again; each guard hears one wave of shouts once, so two guards in earshot
+   * do not alert each other forever (that recursed until the stack overflowed).
+   */
   shout() {
     if (!this.lastKnown) return;
-    for (const other of this.world.characters()) {
-      if (other === this || !other.alive || other.team !== this.team) continue;
-      const d = dist(other.position, this.position);
-      if (d < 15 * METRE || (d < 35 * METRE && this.game.services.physics?.lineOfSight(this.eye(), other.eye()))) {
-        other.lastKnown ??= [...this.lastKnown];
-        other.alertFrom = this;
-        other.post("AIEVENT_ALERT", { position: this.lastKnown });
+    const outermost = shoutWave === null;
+    const wave = (shoutWave ??= new Set());
+    wave.add(this);
+    try {
+      for (const other of this.world.characters()) {
+        if (other === this || !other.alive || other.team !== this.team || wave.has(other)) continue;
+        const d = dist(other.position, this.position);
+        if (d < 15 * METRE || (d < 35 * METRE && this.game.services.physics?.lineOfSight(this.eye(), other.eye()))) {
+          wave.add(other);
+          other.lastKnown ??= [...this.lastKnown];
+          other.alertFrom = this;
+          other.post("AIEVENT_ALERT", { position: this.lastKnown });
+        }
       }
+    } finally {
+      if (outermost) shoutWave = null;
     }
   }
 
@@ -712,8 +720,12 @@ export class Soldier implements AiCharacter {
 
   // ------------------------------------------------------------------------------------------------- senses
 
-  /** The enemy this character fights: the player, if alive and on another team. */
+  /**
+   * The enemy this character fights: the player, if alive and on another team. Not during scripted cutscenes: IGI
+   * removes the HumanPlayer task then, so guards cannot shoot Jones while the outro plays.
+   */
   target(): Entity | null {
+    if (this.game.services.mission?.cutscene()) return null;
     const p = this.game.services.player?.entity;
     return p && p.alive && p.team !== this.team ? p : null;
   }
