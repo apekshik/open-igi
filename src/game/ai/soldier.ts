@@ -255,15 +255,22 @@ export class Soldier implements AiCharacter {
     // friendly team advances that way); without this every task field read 0.
     const mission = this.game.services.mission;
     const scriptVariable = (name: string): ScriptValue => mission?.evaluate(name) ?? 0;
+    const scriptAssign = (name: string, value: ScriptValue) => mission?.assign?.(name, Number(value) || 0);
     const level = this.world.script(this.aiId);
     const common = this.world.commonScript(this.aiType);
-    const natives = this.natives(queued, common, scriptVariable);
-    if (level) runScript(level, natives, scriptVariable);
+    const natives = this.natives(queued, common, scriptVariable, scriptAssign);
+    // Without a level script the common script runs through DefaultHandler, which guards against recursion.
+    if (level) runScript(level, natives, scriptVariable, scriptAssign);
     else natives.AIFunction_DefaultHandler();
   }
 
   /** The engine side of the scripts: AIFunction_* queries/settings and AIAction_* actions. */
-  private natives(queued: Action[], common: QvmScript | null, variable: (name: string) => ScriptValue): ScriptNatives {
+  private natives(
+    queued: Action[],
+    common: QvmScript | null,
+    variable: (name: string) => ScriptValue,
+    assign: (name: string, value: ScriptValue) => void,
+  ): ScriptNatives {
     const n = (v: ScriptValue | undefined) => (typeof v === "number" ? v : 0);
     // A DefaultHandler call from inside the common script means the engine's built-in handling, not the common
     // script again (that would recurse until the stack overflowed).
@@ -274,7 +281,7 @@ export class Soldier implements AiCharacter {
         if (common && !inCommon) {
           inCommon = true;
           try {
-            runScript(common, natives, variable);
+            runScript(common, natives, variable, assign);
           } finally {
             inCommon = false;
           }
