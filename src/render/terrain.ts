@@ -4,9 +4,11 @@
 //   3. light: greyscale lightmap, multiplied (as 1/3 + 2/3 * lightmap)
 // Ground textures live in one texture array and lightmaps in one atlas, so each pass is a single draw.
 // Blending happens on the raw (gamma-space) texel values, like the original.
+// Rebuilds after the first run in a Web Worker (terrain-worker.ts), so walking around does not stall the frame.
 import * as THREE from "three";
 import type { Texture } from "../formats/tex.ts";
 import { buildTerrain, type BuildOptions, type LightMapAtlas, type TerrainData, type TerrainLayer } from "../level/terrain.ts";
+import type { TerrainWorkerRequest, TerrainWorkerResult } from "./terrain-worker.ts";
 
 const vertexShader = /* glsl */ `
   #include <common>
@@ -22,7 +24,7 @@ const vertexShader = /* glsl */ `
     vAlpha = alpha;
     vTexture = int(texture + 0.5);
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-    vFogDepth = -mvPosition.z;
+    vFogDepth = length(mvPosition.xyz);
     gl_Position = projectionMatrix * mvPosition;
     #include <logdepthbuf_vertex>
   }
@@ -32,7 +34,8 @@ const fogChunk = /* glsl */ `
   uniform vec3 fogColor;
   uniform float fogNear;
   uniform float fogFar;
-  float fogAmount() { return smoothstep(fogNear, fogFar, vFogDepth); }
+  // Linear in distance from the eye, as the static models use.
+  float fogAmount() { return clamp((vFogDepth - fogNear) / (fogFar - fogNear), 0.0, 1.0); }
 `;
 
 const materialFragment = /* glsl */ `
@@ -89,6 +92,11 @@ export class TerrainRenderer {
   private materials: THREE.ShaderMaterial[];
   private meshes: THREE.Mesh[] = [];
   private lastView: [number, number, number] | null = null;
+  private worker: Worker | null = null;
+  private workerFailed = false;
+  /** Id of the rebuild the worker is working on, 0 if none. */
+  private inFlight = 0;
+  private nextId = 1;
 
   constructor(opts: TerrainRendererOptions) {
     this.opts = opts;
@@ -130,27 +138,84 @@ export class TerrainRenderer {
     ];
   }
 
-  /** Rebuild around `view` (world units) if it has moved far enough. Returns true if rebuilt. */
+  /**
+   * Rebuild around `view` (world units) if it has moved far enough. The first build runs here, so the terrain exists as
+   * soon as the renderer does; later ones run in the worker and swap in when done (one at a time). Returns true if a
+   * rebuild was made or started.
+   */
   update(view: [number, number, number]): boolean {
     const last = this.lastView;
     if (last && Math.max(Math.abs(view[0] - last[0]), Math.abs(view[1] - last[1]), Math.abs(view[2] - last[2])) < this.opts.rebuildDistance) {
       return false;
     }
+    if (this.inFlight) return false;
     this.lastView = view;
     const { radius, minLevel, detail, origin } = this.opts;
     const build: BuildOptions = { view, radius, minLevel, detail, origin, atlas: this.atlas };
-    const mesh = buildTerrain(this.opts.data, build);
-    for (const m of this.meshes) m.geometry.dispose();
-    this.group.clear();
-    this.meshes = [mesh.base, mesh.blend, mesh.light].map((layer, i) => {
-      const m = new THREE.Mesh(layerGeometry(layer), this.materials[i]);
-      m.renderOrder = i;
-      m.frustumCulled = false;
-      this.group.add(m);
-      return m;
+    if (this.meshes.length && this.startWorker()) {
+      this.inFlight = this.nextId++;
+      this.worker!.postMessage({ type: "build", id: this.inFlight, options: build } satisfies TerrainWorkerRequest);
+      return true;
+    }
+    this.apply(buildTerrain(this.opts.data, build));
+    return true;
+  }
+
+  /** Build synchronously around `view`, e.g. after a teleport, dropping any rebuild still in the worker. */
+  rebuildNow(view: [number, number, number]) {
+    this.inFlight = 0;
+    this.lastView = view;
+    const { radius, minLevel, detail, origin } = this.opts;
+    this.apply(buildTerrain(this.opts.data, { view, radius, minLevel, detail, origin, atlas: this.atlas }));
+  }
+
+  /** Start the worker on first use; false where workers are unavailable (rebuilds then stay synchronous). */
+  private startWorker(): boolean {
+    if (this.worker) return true;
+    if (this.workerFailed || typeof Worker === "undefined") return false;
+    try {
+      this.worker = new Worker(new URL("./terrain-worker.ts", import.meta.url), { type: "module" });
+    } catch {
+      this.workerFailed = true;
+      return false;
+    }
+    this.worker.postMessage({ type: "data", data: this.opts.data } satisfies TerrainWorkerRequest);
+    this.worker.onmessage = (e: MessageEvent<TerrainWorkerResult>) => {
+      if (e.data.id !== this.inFlight) return;
+      this.inFlight = 0;
+      this.apply(e.data);
+    };
+    this.worker.onerror = () => {
+      this.worker?.terminate();
+      this.worker = null;
+      this.workerFailed = true;
+      this.inFlight = 0;
+      this.lastView = null;
+    };
+    return true;
+  }
+
+  /** Swap in new geometry, keeping the three layer meshes (other systems may hold on to them). */
+  private apply(mesh: { base: TerrainLayer; blend: TerrainLayer; light: TerrainLayer }) {
+    [mesh.base, mesh.blend, mesh.light].forEach((layer, i) => {
+      let m = this.meshes[i];
+      if (!m) {
+        m = this.meshes[i] = new THREE.Mesh(layerGeometry(layer), this.materials[i]);
+        m.renderOrder = i;
+        m.frustumCulled = false;
+        this.group.add(m);
+      } else {
+        m.geometry.dispose();
+        m.geometry = layerGeometry(layer);
+      }
     });
     this.triangles = mesh.light.indices.length / 3;
-    return true;
+  }
+
+  dispose() {
+    this.worker?.terminate();
+    this.worker = null;
+    for (const m of this.meshes) m.geometry.dispose();
   }
 }
 

@@ -19,7 +19,7 @@
 in `game.world`, calls every system's `init` in order, then runs the frame loop: `update(dt)` for each system (skipped
 while `game.paused`), `lateUpdate(dt)` (always), terrain LOD update, render, input end-of-frame.
 
-Systems live in `src/game/<name>/index.ts` and are listed once in `src/game/systems.ts` (order: physics, world,
+Systems live in `src/game/<name>/index.ts` and are listed once in `src/game/systems.ts` (order: world, physics,
 audio, player, weapons, ai, mission, hud). Each starts as a working stub; a workstream replaces its own system's
 implementation in place. Do not edit `systems.ts`, `game.ts`, `entity.ts`, `input.ts`, `coords.ts` or `events.ts`
 unless the change is small, generic and called out in your PR; prefer additions in your own folder.

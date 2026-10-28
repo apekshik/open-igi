@@ -2,6 +2,7 @@
 // (language/<lang>/missions.res, the strings the original mission-select screen shows), the mission picture from
 // menusystem/missionsprites.res, and the briefing text once the mission system can provide it.
 import { readStrings } from "../game/hud/gfx.ts";
+import { missionInfo } from "../game/mission/text.ts";
 import type { Vfs } from "../vfs/vfs.ts";
 
 export const MISSION_COUNT = 14;
@@ -27,9 +28,10 @@ export async function missionCatalog(vfs: Vfs, language = "english"): Promise<Mi
 }
 
 /**
- * Briefing text for the loading screen. The mission workstream is building `missionInfo(vfs, level)`; until it lands
- * this returns the catalog description. Switch the body over to it then.
+ * Briefing text for the loading screen (a two-line panel): the mission's description from mission.qvm's
+ * DefineMission strings. Objectives are on the map computer's Objectives page.
  */
-export async function missionBriefing(_vfs: Vfs, mission: MissionEntry): Promise<string> {
-  return mission.description;
+export async function missionBriefing(vfs: Vfs, mission: MissionEntry): Promise<string> {
+  const info = await missionInfo(vfs, mission.level).catch(() => null);
+  return info?.description || mission.description;
 }
