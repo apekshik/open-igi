@@ -11,6 +11,8 @@ export interface WeaponState {
   clipSize: number;
   /** Rounds in reserve, not counting the clip. */
   reserve: number;
+  /** The M16's M203 grenade launcher is selected (alternate fire); clip and reserve count 40 mm grenades. */
+  alternate?: boolean;
 }
 
 /** What the player is looking through: binoculars, a sniper scope, a plain zoom (MP5SD), or nothing. */

@@ -1,39 +1,31 @@
-// Minimal reader for common/sprites/*.spr (inside sprites.res), enough for the scope/binocular overlays and effect
-// sprites: "LOOP" version 9, u32 @40 width, u32 @44 height, u32 @48 format (3 = BGRA8888, 2 = ARGB1555); the first
-// frame's pixels start at byte 124, rows from the top. Multi-frame sprites (blood1) are not split. Our own reading.
+// Reader for common/sprites/*.spr (inside sprites.res) for the scope/binocular overlays and effect sprites. A sprite is
+// a version 9 LOOP texture; multi-image ones are flip-book frames of the same size (blood1: 7 frames of 32x32), decoded
+// with the shared texture reader (src/formats/tex.ts).
 import * as THREE from "three";
 import { readRes } from "../../formats/ilff.ts";
+import { decodeTexArray } from "../../formats/tex.ts";
 import type { Vfs } from "../../vfs/vfs.ts";
 
 export interface Sprite {
   width: number;
   height: number;
+  /** The first frame. */
   rgba: Uint8Array<ArrayBuffer>;
+  /** Every frame (only when there is more than one). */
+  frames?: Uint8Array<ArrayBuffer>[];
 }
 
 export function decodeSprite(bytes: Uint8Array): Sprite | null {
   if (bytes.length < 128 || String.fromCharCode(...bytes.subarray(0, 4)) !== "LOOP") return null;
-  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const width = v.getUint32(40, true), height = v.getUint32(44, true), format = v.getUint32(48, true);
-  const bpp = format === 3 ? 4 : format === 2 ? 2 : 0;
-  if (!bpp || 124 + width * height * bpp > bytes.length) return null;
-  const rgba = new Uint8Array(width * height * 4);
-  for (let i = 0; i < width * height; i++) {
-    if (bpp === 4) {
-      const o = 124 + i * 4;
-      rgba[i * 4] = bytes[o + 2];
-      rgba[i * 4 + 1] = bytes[o + 1];
-      rgba[i * 4 + 2] = bytes[o];
-      rgba[i * 4 + 3] = bytes[o + 3];
-    } else {
-      const p = v.getUint16(124 + i * 2, true);
-      rgba[i * 4] = ((p >> 10) & 31) * 8.226;
-      rgba[i * 4 + 1] = ((p >> 5) & 31) * 8.226;
-      rgba[i * 4 + 2] = (p & 31) * 8.226;
-      rgba[i * 4 + 3] = p & 0x8000 ? 255 : 0;
-    }
+  try {
+    const images = decodeTexArray(bytes).filter((i) => i.width && i.height);
+    if (!images.length) return null;
+    const { width, height } = images[0];
+    const frames = images.filter((i) => i.width === width && i.height === height).map((i) => i.rgba as Uint8Array<ArrayBuffer>);
+    return { width, height, rgba: frames[0], frames: frames.length > 1 ? frames : undefined };
+  } catch {
+    return null;
   }
-  return { width, height, rgba };
 }
 
 /** All sprites in common/sprites/sprites.res by base name ("binoculars", "smoke1", ...). */

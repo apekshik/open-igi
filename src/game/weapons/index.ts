@@ -69,6 +69,11 @@ const IMPACT_PARTS: Record<string, number> = {
 const SLOT_KEYS: Action[] = ["weapon1", "weapon2", "weapon3", "weapon4", "weapon5", "weapon6", "weapon7", "weapon8", "weapon9"];
 const FIREARMS = new Set(["GUN", "PISTOL", "SHOTGUN"]);
 const THROWN = new Set(["GRENADE", "PROXIMITYMINE"]);
+/** The M16's grenade launcher: its ammo and the time to load the next grenade (IGI's Reload Time, 2 s for all). */
+const M203_AMMO = "AMMO_ID_M203";
+const M203_RELOAD = 2;
+/** Damage factor of an M203 grenade at the centre (not in the data; the hand grenade's 1.3). */
+const M203_DAMAGE = 1.3;
 
 const displayName = (s: WeaponSpec) => s.name.replace(/[<>]/g, "");
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -122,10 +127,11 @@ class Arsenal implements WeaponsService {
   private burst = 0;
   private triggerUp = true;
   private binoculars = false;
+  /** Alternate fire on the M16: the M203 grenade launcher is selected. */
+  private m203 = false;
   private zoomKind: ZoomKind = null;
   private zoomFov = 70;
   private baseFov = 70;
-  private baseSensitivity = 0;
   private lastZoomSound = 0;
   private moving = false;
 
@@ -239,6 +245,11 @@ class Arsenal implements WeaponsService {
   current(): WeaponState | null {
     if (this.binoculars || !this.held) return null;
     const c = this.carried.get(this.held);
+    if (c && this.m203) {
+      const grenades = this.reserve.get(M203_AMMO) ?? 0;
+      const loaded = Math.min(1, grenades);
+      return { id: c.spec.id, name: "M203", clip: loaded, clipSize: 1, reserve: grenades - loaded, alternate: true };
+    }
     return c ? this.stateOf(c) : null;
   }
 
@@ -486,6 +497,10 @@ class Arsenal implements WeaponsService {
     if (p.kind === "grenade") this.explode(p.position, p.ownerId, (x.radius ?? 7) * METRE, (x.falloff ?? 4) * METRE, x.damage ?? 1.3, "grenade");
     else if (p.kind === "flashbang") this.explode(p.position, p.ownerId, (x.radius ?? 10) * METRE, (x.falloff ?? 15) * METRE, 0, "flashbang");
     else if (p.kind === "mine") this.explode(p.position, p.ownerId, (x.radius ?? 3.5) * METRE, (x.radius ?? 3.5) * 0.5 * METRE, 2, "mine");
+    else if (p.kind === "m203") {
+      const r = (x.m203Radius ?? 3) * METRE;
+      this.explode(p.position, p.ownerId, r, r * 0.6, M203_DAMAGE, "grenade");
+    }
     else this.explode(p.position, p.ownerId, 6 * METRE, 3 * METRE, 2, "missile");
   }
 
@@ -629,6 +644,7 @@ class Arsenal implements WeaponsService {
   /** Lower the weapon in hand (if any) and raise another. */
   private raise(weaponId: string | null, animate: boolean) {
     const vm = this.viewModel;
+    this.m203 = false;
     this.cancel("reload");
     this.setZoom(null);
     this.stopLoop(this.playerId);
@@ -675,7 +691,7 @@ class Arsenal implements WeaponsService {
   }
 
   private reload() {
-    if (!this.held || this.state !== "ready") return;
+    if (!this.held || this.state !== "ready" || this.m203) return;
     const c = this.carried.get(this.held)!;
     const spec = c.spec;
     const ammoId = this.ammoIdOf(spec);
@@ -738,13 +754,12 @@ class Arsenal implements WeaponsService {
     if (!player) return;
     if (!this.zoomKind && kind) {
       this.baseFov = player.defaultFov ?? player.fov;
-      this.baseSensitivity = input.sensitivity;
     }
     if (!kind && !this.zoomKind) return;
     this.zoomKind = kind;
     this.zoomFov = kind ? fov : this.baseFov;
     player.fov = this.zoomFov;
-    input.sensitivity = this.baseSensitivity * (kind ? Math.tan(deg(this.zoomFov) / 2) / Math.tan(deg(this.baseFov) / 2) : 1);
+    input.lookScale = kind ? Math.tan(deg(this.zoomFov) / 2) / Math.tan(deg(this.baseFov) / 2) : 1;
     if (this.viewModel) this.viewModel.hidden = kind === "binoculars" || kind === "scope";
     if (this.drawOverlay && kind) this.overlay.show(kind, this.zoomFov, this.baseFov);
     else this.overlay.hide();
@@ -781,10 +796,17 @@ class Arsenal implements WeaponsService {
     return this.zoomKind === "scope" ? [min, 30] : [min, this.baseFov];
   }
 
-  /** Right mouse: the Dragunov's scope or the MP5SD's zoom. */
+  /** Alternate fire (right mouse): the Dragunov's scope, the MP5SD's zoom, or the M16's M203 grenade launcher. */
   private toggleAim() {
     const spec = this.held ? this.spec(this.held) : undefined;
     if (!spec || this.state !== "ready") return;
+    if (extras(this.data, spec).m203Velocity !== undefined) {
+      this.m203 = !this.m203;
+      this.stopLoop(this.playerId);
+      this.sound("new_gun", undefined, GUNSHOT_RANGE, 0.6);
+      this.game.events.emit("weapon:switch", { ownerId: this.playerId, weapon: spec.id });
+      return;
+    }
     const min = extras(this.data, spec).zoomMinFov;
     if (min === undefined) return;
     if (this.zoomKind) {
@@ -863,11 +885,48 @@ class Arsenal implements WeaponsService {
     } else {
       this.shotSound(this.playerId, spec, eye);
       this.shoot(this.playerId, spec, eye, look, { spreadScale: GAIT_SPREAD[player.gait] ?? 1 }, true);
+      this.ejectCasing(spec, muzzle, look);
     }
     // View kick (degrees about X = pitch up, about Z = yaw), fixed plus random.
     player.pitch = Math.min(1.5, player.pitch + deg(spec.kick.fixedX + rand(-1, 1) * spec.kick.randomX));
     player.yaw += deg(spec.kick.fixedZ + rand(-1, 1) * spec.kick.randomZ);
     if (c.clip === 0) this.stopLoop(this.playerId);
+  }
+
+  /** The spent case (the weapon's Casing Model) out of the ejection port, about a gun length behind the muzzle. */
+  private ejectCasing(spec: WeaponSpec, muzzle: Vec3, look: Vec3) {
+    if (!spec.casingModel) return;
+    const built = this.game.level.library.build(spec.casingModel);
+    if (!built) return;
+    const port = vec3.add(muzzle, vec3.add(vec3.scale(look, -0.35 * METRE), [0, 0, -0.03 * METRE]));
+    this.effects.casing(port, look, new THREE.Mesh(built.geometry, built.materials));
+  }
+
+  /** One 40 mm grenade from the M16's launcher: a ballistic shot that explodes where it lands. */
+  private fireM203(spec: WeaponSpec) {
+    const grenades = this.reserve.get(M203_AMMO) ?? 0;
+    if (grenades <= 0) {
+      this.sound("guns_dry_1");
+      return;
+    }
+    this.reserve.set(M203_AMMO, grenades - 1);
+    this.nextShot = this.game.time + M203_RELOAD;
+    const player = this.game.services.player!;
+    const look = direction(player.yaw, player.pitch);
+    const x = extras(this.data, spec);
+    // weaponconfig.qvm labels the speed km/h, but the value (85) only makes sense as m/s, like every other muzzle
+    // velocity in the tables (M16 950, a real M203 76 m/s).
+    const speed = (x.m203Velocity ?? 85) * METRE;
+    const lib = this.game.level.library;
+    const model = lib.build(this.ammo(M203_AMMO)?.model ?? "");
+    const object = model ? new THREE.Mesh(model.geometry, model.materials) : new THREE.Mesh(new THREE.SphereGeometry(0.03 * METRE), new THREE.MeshLambertMaterial({ color: 0x334422 }));
+    const from = vec3.add(player.eye(), vec3.scale(look, 0.6 * METRE));
+    this.projectiles.add({ kind: "m203", weapon: spec.id, ownerId: this.playerId, position: from, velocity: vec3.scale(look, speed), timer: 12, state: "flying", object, bounces: 0 });
+    this.sound("m203_launch_1");
+    this.viewModel?.fireKick(1.2);
+    player.pitch = Math.min(1.5, player.pitch + deg(2.5));
+    this.game.events.emit("weapon:fire", { ownerId: this.playerId, weapon: spec.id, origin: from, direction: look, silenced: false });
+    this.game.events.emit("noise", { position: from, radius: GUNSHOT_NOISE * 0.5, sourceId: this.playerId, kind: "gunshot" });
   }
 
   /** After throwing or using up a medipack round: take the next one from the reserve. */
@@ -953,6 +1012,11 @@ class Arsenal implements WeaponsService {
     }
     if (!held || !fireDown) return;
     const spec = held.spec;
+    if (this.m203) {
+      if (this.state === "ready" && game.time >= this.nextShot && this.triggerUp) this.fireM203(spec);
+      this.triggerUp = false;
+      return;
+    }
     // Firing interrupts a shell-by-shell reload.
     if (this.state === "reloading" && spec.ammoDisplay === "SHELL" && held.clip > 0) this.cancel("reload");
     if (this.state !== "ready" || game.time < this.nextShot) return;

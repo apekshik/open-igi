@@ -31,7 +31,8 @@ export interface GameOptions {
   systems: GameSystem[];
   /** Terrain level-of-detail multiplier (1 = original game). */
   detail?: number;
-  onProgress?: (text: string) => void;
+  /** Load steps as text, with the fraction done (0..1). */
+  onProgress?: (text: string, fraction?: number) => void;
 }
 
 export class Game {
@@ -60,6 +61,7 @@ export class Game {
   private running = false;
   private last = 0;
   private options: GameOptions;
+  private resizer: ResizeObserver;
 
   private constructor(options: GameOptions) {
     this.options = options;
@@ -81,7 +83,8 @@ export class Game {
     sun.position.set(1, 2, 1.5);
     this.scene.add(sun);
     this.camera.rotation.order = "YXZ";
-    new ResizeObserver(() => this.resize()).observe(host);
+    this.resizer = new ResizeObserver(() => this.resize());
+    this.resizer.observe(host);
     this.resize();
   }
 
@@ -93,12 +96,16 @@ export class Game {
   }
 
   private async load() {
-    const progress = this.options.onProgress ?? (() => {});
-    progress(`loading ${this.options.level}...`);
+    // Report each step with the fraction done, and yield so the loading screen can repaint between steps.
+    const progress = async (text: string, fraction: number) => {
+      this.options.onProgress?.(text, fraction);
+      await yieldTask();
+    };
+    await progress(`loading ${this.options.level}...`, 0.02);
     this.level = await loadLevel(this.vfs, this.options.level);
     this.origin = this.level.objects.playerStart ?? this.level.objects.placements[0]?.position ?? [0, 0, 0];
 
-    progress("placing objects...");
+    await progress("placing objects...", 0.35);
     for (const p of this.level.objects.placements) {
       const built = this.level.library.build(p.model);
       if (!built) continue;
@@ -111,12 +118,12 @@ export class Game {
     }
     this.world.updateMatrixWorld(true);
 
-    for (const s of this.systems) {
-      progress(`starting ${s.name}...`);
+    for (const [i, s] of this.systems.entries()) {
+      await progress(`starting ${s.name}...`, 0.4 + (0.45 * i) / this.systems.length);
       await s.init?.(this);
     }
 
-    progress("building terrain...");
+    await progress("building terrain...", 0.86);
     const fog = this.services.world?.fog ?? { color: 0x9aa7b4, near: 300 * METRE, far: 4000 * METRE };
     this.terrain = new TerrainRenderer({
       ...this.level.terrain,
@@ -130,8 +137,32 @@ export class Game {
     this.world.add(this.terrain.group);
     this.terrain.update(this.services.player?.eye() ?? this.origin);
     this.world.updateMatrixWorld(true);
+    await progress("preparing shaders...", 0.92);
+    await this.warmUp();
     this.events.emit("level:loaded", { level: this.level.name });
-    progress("");
+    this.options.onProgress?.("", 1);
+  }
+
+  /**
+   * Compile every material's shader and upload every texture now, so the first look at a building or a soldier
+   * does not stall a frame for 100+ ms mid-game.
+   */
+  private async warmUp() {
+    const textures = new Set<THREE.Texture>();
+    this.scene.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      for (const mat of Array.isArray(m) ? m : m ? [m] : []) {
+        for (const v of Object.values(mat)) if ((v as THREE.Texture)?.isTexture) textures.add(v as THREE.Texture);
+        const uniforms = (mat as THREE.ShaderMaterial).uniforms;
+        if (uniforms) for (const u of Object.values(uniforms)) if ((u.value as THREE.Texture)?.isTexture) textures.add(u.value);
+      }
+    });
+    for (const t of textures) this.renderer.initTexture(t);
+    try {
+      await this.renderer.compileAsync(this.scene, this.camera);
+    } catch (err) {
+      console.warn("shader warm-up failed", err);
+    }
   }
 
   private run() {
@@ -143,13 +174,26 @@ export class Game {
       this.last = now;
       if (!this.paused) {
         this.time += dt;
-        for (const s of this.systems) s.update?.(dt, this);
+        for (const s of this.systems) if (s.update) this.guard(s, s.update, dt);
       }
-      for (const s of this.systems) s.lateUpdate?.(dt, this);
+      for (const s of this.systems) if (s.lateUpdate) this.guard(s, s.lateUpdate, dt);
       this.terrain?.update(this.fromScene(this.camera.position));
       this.renderer.render(this.scene, this.camera);
       this.input.endFrame();
     });
+  }
+
+  private failed = new Set<string>();
+
+  /** Run one system step; an exception is logged (once per system) instead of stopping the frame loop. */
+  private guard(s: GameSystem, fn: (dt: number, game: Game) => void, dt: number) {
+    try {
+      fn.call(s, dt, this);
+    } catch (err) {
+      if (this.failed.has(s.name)) return;
+      this.failed.add(s.name);
+      console.error(`${s.name} system failed (further errors from it are not logged):`, err);
+    }
   }
 
   /** Point the camera from an IGI-space eye position with yaw/pitch (radians) and a vertical FOV in degrees. */
@@ -195,9 +239,23 @@ export class Game {
     this.running = false;
     this.renderer.setAnimationLoop(null);
     for (const s of this.systems) s.dispose?.(this);
+    this.terrain?.dispose();
     this.input.dispose();
+    // The host element outlives the game: an observer left on it would keep this whole Game (level, scene) alive.
+    this.resizer.disconnect();
     this.renderer.dispose();
+    // Free the WebGL context now; browsers cap live contexts (about 16) and restarts would run into the cap.
+    this.renderer.forceContextLoss();
     this.renderer.domElement.remove();
     this.overlay.remove();
   }
+}
+
+/** Let the browser run other tasks (and paint). A message, unlike setTimeout, is not throttled in background tabs. */
+function yieldTask(): Promise<void> {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => resolve();
+    channel.port2.postMessage(0);
+  });
 }

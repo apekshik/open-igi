@@ -68,6 +68,8 @@ export class Input {
   sensitivity = 0.0022;
   /** Invert vertical mouse look (options menu). */
   invertY = false;
+  /** Extra look multiplier set by gameplay (scopes slow the mouse), kept apart from the player's sensitivity setting. */
+  lookScale = 1;
   private down = new Set<string>();
   private pressed = new Set<string>();
   private mouse = { dx: 0, dy: 0 };
@@ -131,7 +133,8 @@ export class Input {
 
   /** Mouse movement since the last frame, in radians (x: yaw, y: pitch). */
   look(): { yaw: number; pitch: number } {
-    return { yaw: -this.mouse.dx * this.sensitivity, pitch: (this.invertY ? 1 : -1) * this.mouse.dy * this.sensitivity };
+    const k = this.sensitivity * this.lookScale;
+    return { yaw: -this.mouse.dx * k, pitch: (this.invertY ? 1 : -1) * this.mouse.dy * k };
   }
 
   /** Called by the game at the end of each frame. */

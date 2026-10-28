@@ -13,6 +13,18 @@ const DIM = "#3f8a37";
 const PANEL = "rgba(4,16,6,0.92)";
 /** Render-target size for the satellite image. */
 const IMAGE = 1024;
+
+/**
+ * Yaw (coords.direction convention) that IGI's compass calls north: world -Y, so east is -X. The game's own text
+ * fixes it: in mission 8 Anya sends Jones to "the tank compound that's to the east" (M8_MSG_1), and the tank
+ * compound and its map computer pickup lie about 420 m towards -X of the player start. Mission starts agree: levels
+ * 1-5 and 8 all start Jones facing within 40 degrees of this north.
+ */
+export const NORTH_YAW = Math.PI;
+
+/** -1: the map is drawn with north (IGI -Y) up and east (-X) to the right. */
+const FLIP = Math.cos(NORTH_YAW) > 0 ? 1 : -1;
+
 const TABS = ["MAP", "OBJECTIVES", "LOG"] as const;
 type Tab = (typeof TABS)[number];
 
@@ -76,8 +88,8 @@ export class MapComputer {
       this.mouse = { x: e.offsetX, y: e.offsetY };
       if (!this.drag) return;
       const k = this.view.scale * METRE;
-      this.view.x = this.drag.vx - (e.offsetX - this.drag.x) * k;
-      this.view.y = this.drag.vy + (e.offsetY - this.drag.y) * k;
+      this.view.x = this.drag.vx - FLIP * (e.offsetX - this.drag.x) * k;
+      this.view.y = this.drag.vy + FLIP * (e.offsetY - this.drag.y) * k;
     });
     on("pointerup", () => (this.drag = null));
     on("wheel", (e) => {
@@ -140,12 +152,12 @@ export class MapComputer {
 
   private toScreen(p: Vec3 | [number, number], r: { x: number; y: number; w: number; h: number }) {
     const k = this.view.scale * METRE;
-    return [r.x + r.w / 2 + (p[0] - this.view.x) / k, r.y + r.h / 2 - (p[1] - this.view.y) / k];
+    return [r.x + r.w / 2 + (FLIP * (p[0] - this.view.x)) / k, r.y + r.h / 2 - (FLIP * (p[1] - this.view.y)) / k];
   }
 
   private toWorld(sx: number, sy: number, r: { x: number; y: number; w: number; h: number }): [number, number] {
     const k = this.view.scale * METRE;
-    return [this.view.x + (sx - r.x - r.w / 2) * k, this.view.y - (sy - r.y - r.h / 2) * k];
+    return [this.view.x + FLIP * (sx - r.x - r.w / 2) * k, this.view.y - FLIP * (sy - r.y - r.h / 2) * k];
   }
 
   frame(dt: number) {
@@ -154,10 +166,10 @@ export class MapComputer {
     const keys = this.game.input;
     // Keyboard panning and zooming (the movement keys pan, as the arrow buttons do).
     const pan = 300 * dt * this.view.scale * METRE;
-    if (keys.isDown("forward")) this.view.y += pan;
-    if (keys.isDown("back")) this.view.y -= pan;
-    if (keys.isDown("left")) this.view.x -= pan;
-    if (keys.isDown("right")) this.view.x += pan;
+    if (keys.isDown("forward")) this.view.y += FLIP * pan;
+    if (keys.isDown("back")) this.view.y -= FLIP * pan;
+    if (keys.isDown("left")) this.view.x -= FLIP * pan;
+    if (keys.isDown("right")) this.view.x += FLIP * pan;
 
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
@@ -268,7 +280,7 @@ export class MapComputer {
     ctx.clip();
     const snap = this.snapshot;
     if (snap) {
-      const [x0, y0] = this.toScreen([snap.x - snap.span / 2, snap.y + snap.span / 2], r);
+      const [x0, y0] = this.toScreen([snap.x - (FLIP * snap.span) / 2, snap.y + (FLIP * snap.span) / 2], r);
       const size = snap.span / (this.view.scale * METRE);
       ctx.drawImage(snap.canvas, x0, y0, size, size);
       // Phosphor tint like IGI's satellite screen.
@@ -290,8 +302,9 @@ export class MapComputer {
     // 100 m grid (or coarser when zoomed out).
     let step = 100 * METRE;
     while (step / (this.view.scale * METRE) < 40) step *= 2;
-    const [wx0, wy1] = this.toWorld(r.x, r.y, r);
-    const [wx1, wy0] = this.toWorld(r.x + r.w, r.y + r.h, r);
+    const [ax, ay] = this.toWorld(r.x, r.y, r);
+    const [bx, by] = this.toWorld(r.x + r.w, r.y + r.h, r);
+    const [wx0, wx1, wy0, wy1] = [Math.min(ax, bx), Math.max(ax, bx), Math.min(ay, by), Math.max(ay, by)];
     ctx.strokeStyle = "rgba(125,255,106,0.16)";
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -342,8 +355,8 @@ export class MapComputer {
     });
     const player = this.game.services.player;
     if (player) {
-      // h_player points up; the yaw is counter-clockwise about Z, the canvas rotates clockwise.
-      icon("h_player", player.entity.position, 16, -player.yaw);
+      // h_player points up (north); the yaw is counter-clockwise about Z, the canvas rotates clockwise.
+      icon("h_player", player.entity.position, 16, -(player.yaw - NORTH_YAW));
       const [sx, sy] = this.toScreen(player.entity.position, r);
       ctx.strokeStyle = "rgba(125,255,106,0.5)";
       ctx.beginPath();
@@ -441,7 +454,7 @@ export class MapComputer {
     const top = (game.services.player?.eye()[2] ?? game.origin[2]) + 3000 * METRE;
     const camera = new THREE.OrthographicCamera(-span / 2, span / 2, span / 2, -span / 2, 1 * METRE, 8000 * METRE);
     camera.position.copy(game.toScene([x, y, top]));
-    camera.up.set(0, 0, -1); // north (IGI +Y) is three's -Z
+    camera.up.set(0, 0, -FLIP); // screen up is IGI +Y * FLIP, which is three's -Z * FLIP
     camera.lookAt(game.toScene([x, y, top - METRE]));
     camera.updateMatrixWorld();
 
