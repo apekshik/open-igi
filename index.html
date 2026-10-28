@@ -4,30 +4,51 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>open-igi</title>
+    <meta name="description" content="Project I.G.I. (2000) rebuilt for the browser. Free, open source, bring your own copy of the game." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23111'/%3E%3Ccircle cx='8' cy='8' r='4' fill='none' stroke='%238a8' stroke-width='1.5'/%3E%3C/svg%3E" />
     <style>
       :root { color-scheme: dark; font: 13px/1.4 ui-monospace, Consolas, monospace; }
       html, body { height: 100%; }
       body { margin: 0; background: #111; color: #ccc; display: flex; flex-direction: column; }
       header { padding: 8px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid #222; }
+      header[hidden] { display: none; }
       h1 { font-size: 14px; margin: 0; color: #fff; }
+      a { color: #8a8; }
+      button { font: inherit; background: #222; color: #ccc; border: 1px solid #444; padding: 6px 12px; cursor: pointer; }
+      button:hover { background: #2c2c2c; }
+      button.primary { background: #2d4a2d; border-color: #5a8a5a; color: #fff; }
       #tools { display: contents; }
-      #status { color: #8a8; flex-basis: 100%; overflow-wrap: anywhere; }
+      #status { color: #8a8; padding: 4px 16px; overflow-wrap: anywhere; }
+      #status:empty { display: none; }
+      body.play #status { position: fixed; left: 12px; bottom: 8px; z-index: 5; padding: 0; pointer-events: none; text-shadow: 0 0 3px #000; }
       #stage { flex: 1; min-height: 0; overflow: auto; position: relative; }
       #stage > canvas { display: block; position: absolute; inset: 0; }
       .grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px; }
       figure { margin: 0; display: flex; flex-direction: column; gap: 4px; align-items: center; }
       figure canvas { image-rendering: pixelated; background: repeating-conic-gradient(#222 0 25%, #2a2a2a 0 50%) 0 0 / 16px 16px; max-width: 128px; max-height: 128px; }
       figcaption { font-size: 10px; color: #777; }
+      .landing { max-width: 640px; margin: 0 auto; padding: 48px 20px; font-size: 14px; line-height: 1.6; }
+      .landing h1 { font-size: 32px; letter-spacing: 0.04em; }
+      .landing .tag { color: #8a8; margin-top: 0; }
+      .landing .dim { color: #888; font-size: 12px; }
+      .landing code { background: #1c1c1c; padding: 1px 4px; }
+      .landing section { margin: 24px 0; }
+      #drop { border: 2px dashed #444; padding: 24px; text-align: center; }
+      #drop.over { border-color: #8a8; background: #161d16; }
+      .bar { height: 10px; background: #222; }
+      #fill { height: 100%; background: #6a9a6a; width: 0; }
+      #error { color: #e88; }
+      .landing footer { border-top: 1px solid #222; padding-top: 12px; margin-top: 40px; }
     </style>
   </head>
   <body>
-    <header>
+    <header id="bar" hidden>
       <h1>open-igi</h1>
       <select id="view"><option value="play">play</option><option value="level">level</option><option value="models">models</option><option value="textures">textures</option><option value="sounds">sounds</option></select>
-      <label>Game folder <input id="pick" type="file" webkitdirectory /></label>
+      <a href="?view=landing">data</a>
       <div id="tools"></div>
-      <span id="status"></span>
     </header>
+    <span id="status"></span>
     <div id="stage"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
