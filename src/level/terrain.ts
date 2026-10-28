@@ -44,6 +44,8 @@ export interface TerrainData {
   patches: HeightPatch[];
   modifiers: TextureModifier[];
   lightMaps: LightMapRef[];
+  /** DiscardTerrain cubes: skipped with their subtree, as the engine does when it walks down into them. */
+  discards?: CubeTask[];
   materials: TerrainMaterials;
 }
 
@@ -131,6 +133,11 @@ export function cubeMinAt(p: [number, number, number], level: number): [number, 
 
 const cubeKey = (level: number, min: readonly number[]) => `${level},${min[0]},${min[1]},${min[2]}`;
 
+/** Keys (level,minX,minY,minZ) of the DiscardTerrain cubes. */
+export function discardedCubes(data: TerrainData): Set<string> {
+  return new Set((data.discards ?? []).map((d) => cubeKey(d.level, d.min)));
+}
+
 class LayerBuilder {
   positions: number[] = [];
   uvs: number[] = [];
@@ -168,6 +175,7 @@ export function buildTerrain(data: TerrainData, opts: BuildOptions): TerrainMesh
   for (const p of data.patches) slot(p).patches.push(p);
   for (const m of data.modifiers) slot(m).modifiers.push(m);
   for (const l of data.lightMaps) slot(l).lightMaps.push(l);
+  const discarded = discardedCubes(data);
 
   // Distances are divided by the detail multiplier, which scales every LOD threshold together.
   const wantedLevel = (dist: number) =>
@@ -380,7 +388,9 @@ export function buildTerrain(data: TerrainData, opts: BuildOptions): TerrainMesh
   function walk(index: number, c: [number, number, number], level: number, t: number, parent: Stacks) {
     const node = data.ctr[index];
     const half = ROOT_HALF / 2 ** level;
-    const stacks = enter(parent, level, [c[0] - half, c[1] - half, c[2] - half]);
+    const min = [c[0] - half, c[1] - half, c[2] - half];
+    if (discarded.has(cubeKey(level, min))) return;
+    const stacks = enter(parent, level, min);
     const dx = Math.max(0, Math.abs(c[0] - vx) - half);
     const dy = Math.max(0, Math.abs(c[1] - vy) - half);
     if (Math.hypot(dx, dy) > opts.radius) return;

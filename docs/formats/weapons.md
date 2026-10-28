@@ -22,7 +22,7 @@ Differences from the declared list:
 |---|---|
 | BINOCULARS | min FOV 5, max FOV 90, default FOV 70 (degrees) |
 | DRAGUNOV, MP5SD | zoom min FOV (5, 50) |
-| M16A2 | M203 muzzle velocity (km/h), explosion radius, activate radius (m) |
+| M16A2 | M203 muzzle velocity (labelled km/h; 85, used as m/s), explosion radius, activate radius (m) |
 | PROXIMITYMINE | time before arming 2 s, countdown 0.5 s, activate radius 1.5 m, explosion radius 3 m |
 | MEDIPACK | fraction of max health restored per round (0.01) |
 
@@ -81,7 +81,8 @@ The Spas 12's reload animation (0.63 s) loads one shell.
 ## .spr sprite (partial)
 
 `"LOOP"`, u32 9, ..., u32 @40 width, @44 height, @48 format (3 = BGRA8888, 2 = ARGB1555); single-frame pixels start
-at byte 124. Multi-frame sprites (`blood1`, 7 frames) add 48 bytes of header per frame; not split yet.
+at byte 124. Multi-frame sprites (`blood1`, 7 frames of 32x32) are version 9 texture arrays: one image record per
+frame, read with `decodeTexArray` (src/formats/tex.ts) and played as a flip-book on flesh hits.
 `binoculars.spr` (256x256) is the left eyepiece of the binocular frame, `snipersight.spr` (128x96) the top-left
 quarter of the scope with its reticle posts.
 
@@ -91,3 +92,12 @@ quarter of the scope with its reticle posts.
 65 m (Dragunov 100), reloads 3 m. `_loop` fire sounds repeat while an automatic weapon fires and end with their
 `_loop_e` tail; single-shot weapons alternate their two samples. Reload sounds come in numbered parts
 (`ak47_reload_1..3`), bullet impacts as `bul_<material>_<n>` by the hit surface's game material.
+
+## M203 and casings (reading)
+
+The M16A2 is the only weapon with M203 values. Alternate fire (IGI's AlternateFire action, right mouse here) switches
+it to the grenade launcher: `AMMO_ID_M203` (calibre 10002, pickup model `108_05_1`) is fired as a ballistic grenade at
+the muzzle velocity and explodes on contact with the explosion radius (3 m). The value is labelled km/h in
+weaponconfig.qvm, but every other muzzle velocity in the tables is m/s (M16 950) and 85 m/s matches a real M203. Its
+activate radius (1 m) is not used yet. `Casing Model` (`113_01_1` for 5.56) is ejected to the right of the player's
+gun on every shot.

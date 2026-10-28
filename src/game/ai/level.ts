@@ -119,7 +119,9 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
         maxSide: Number.isFinite(num(params[10])) ? num(params[10]) : 180,
         ammo: Number.isFinite(num(params[11])) ? num(params[11]) : -1,
       });
-    } else if (t === "HumanSoldier") {
+    }
+    // Ekk and Anya (level14) are HumanSoldierFemale tasks, with the same parameters as HumanSoldier.
+    else if (t === "HumanSoldier" || t === "HumanSoldierFemale") {
       characters.push({ ...character(tid, String(name), params, children, scripted), gates, generator, vehicle });
       return;
     }
