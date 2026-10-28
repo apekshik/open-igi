@@ -25,7 +25,11 @@ export type Action =
   | "weapon2"
   | "weapon3"
   | "weapon4"
-  | "weapon5";
+  | "weapon5"
+  | "weapon6"
+  | "weapon7"
+  | "weapon8"
+  | "weapon9";
 
 export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   forward: ["KeyW", "ArrowUp"],
@@ -52,6 +56,10 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   weapon3: ["Digit3"],
   weapon4: ["Digit4"],
   weapon5: ["Digit5"],
+  weapon6: ["Digit6"],
+  weapon7: ["Digit7"],
+  weapon8: ["Digit8"],
+  weapon9: ["Digit9"],
 };
 
 export class Input {
