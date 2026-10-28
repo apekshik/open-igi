@@ -119,7 +119,14 @@ AI level scripts read task variables (`HumanSoldier_404.isDead`) and also write 
 
 `EditCamera` keys run back to back for their `Duration`. `Gamma` is the heading (same convention as ours, 0 = +Y),
 `Alpha` the pitch measured from straight down (−π/2 = horizon), `Beta` the roll. `FOV` 1 is taken as 90° horizontal.
-A `Target task ID` makes the key look at that task. `Smooth to next` interpolates to the next key.
+A `Target task ID` makes the key look at that task. `Smooth to next` interpolates to the next key. A `Link task
+ID` carries the camera with a moving object, placed relative to it as the level places both (see dynamic.md,
+Riding along). The camera's clock runs between logic ticks, as moving objects are drawn.
+
+What a cutscene shows besides its cameras lives in its containers: trains, vehicles driven by AnimTasks gated on
+`CutScene_N.isRun`, cutscene actors (ai.md) and their scripted animations, `ConditionalSound` effects gated on
+`CutScene_N.nTick`, and the dialogue as `StatusMessage`s flagged `Cutscene message`. When the intro is skipped or
+ends, its containers stop and all of it leaves play.
 
 ### Restarting a ConditionalContainer
 

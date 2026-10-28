@@ -16,13 +16,25 @@ import type { QvmScript } from "../../formats/qvm.ts";
 import { direction, METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Entity } from "../entity.ts";
 import type { Game } from "../game.ts";
-import { ANIM_TICKS_PER_SECOND, cycleVelocity } from "../player/animator.ts";
+import { ANIM_TICKS_PER_SECOND, cycleVelocity, looping, rootAt } from "../player/animator.ts";
 import type { AiCharacter, AiEvent, AiState } from "./api.ts";
 import type { SoldierBody } from "./body.ts";
 import type { MountedGun } from "./gun.ts";
 import type { AiConfig, CharacterSpec, PatrolCommand } from "./level.ts";
 import { dist, type NavGraph } from "./nav.ts";
 import { runScript, type ScriptNatives, type ScriptValue } from "./script.ts";
+
+/** A seat on a moving vehicle: feet position and heading, hidden while the vehicle is not in play, body axes when it tilts. */
+export interface Seat {
+  position: Vec3;
+  yaw: number;
+  hidden?: boolean;
+  basis?: [Vec3, Vec3, Vec3];
+}
+const SEAT = new THREE.Matrix4();
+const SEAT_X = new THREE.Vector3();
+const SEAT_Y = new THREE.Vector3();
+const SEAT_Z = new THREE.Vector3();
 
 /** Script ticks per second (GAME_FREQUENCY, 30 in IGI.exe; animation time runs at 160 ticks per game tick). */
 export const GAME_FREQUENCY = 30;
@@ -178,7 +190,19 @@ export class Soldier implements AiCharacter {
   recoil = 0;
   /** An extra or a passenger: no senses, no fighting; follows `anchor` when it has one. */
   passive = false;
-  anchor: (() => { position: Vec3; yaw: number } | null) | null = null;
+  /**
+   * Feet position and heading to keep (a passenger's seat on its moving vehicle), or null to stay put; `hidden` while
+   * the vehicle is not in play.
+   */
+  anchor: (() => Seat | null) | null = null;
+  /**
+   * A cutscene actor: passive (no senses, no fighting) but its scripts still run, so it plays its scripted animations
+   * and patrols. The root motion of the one-shot clips it plays stays with it (Jones jumping from the helicopter onto
+   * the train lands on the train).
+   */
+  actor = false;
+  /** Root motion kept from finished one-shot clips, in the body's own frame (x right, y forward, z up). */
+  private rootShift: Vec3 = [0, 0, 0];
   readonly graph: NavGraph | null;
   stance: Stance = "stand";
   clip = 0;
@@ -461,13 +485,10 @@ export class Soldier implements AiCharacter {
 
   update(dt: number) {
     if (this.passive) {
-      const a = this.anchor?.();
-      if (a) {
-        this.position = [...a.position];
-        this.yaw = a.yaw;
-      }
-      if (this.alive && !this.oneShot) this.setBase(this.idleClip());
+      if (this.actor && this.alive) this.runActions(dt);
+      else if (this.alive && !this.oneShot) this.setBase(this.idleClip());
       if (!this.alive) this.actions[0]?.update(this, dt);
+      this.ride();
       this.animate(dt);
       return;
     }
@@ -515,6 +536,41 @@ export class Soldier implements AiCharacter {
     }
   }
 
+  /**
+   * Keep to the anchor (a seat on a moving vehicle) plus the root motion kept from finished clips; hide while the
+   * vehicle is not in play. The AI system calls it again after every system has moved its vehicles.
+   */
+  ride() {
+    const a = this.anchor?.();
+    if (!a) return;
+    const c = Math.cos(a.yaw), s = Math.sin(a.yaw);
+    const [bx, by, bz] = a.basis ?? [[c, s, 0], [-s, c, 0], [0, 0, 1]];
+    const [x, y, z] = this.rootShift;
+    this.position = [0, 1, 2].map((i) => a.position[i] + bx[i] * x + by[i] * y + bz[i] * z) as Vec3;
+    this.yaw = a.yaw;
+    if (this.body) {
+      this.body.object.visible = !a.hidden;
+      this.body.place(this.game.local(this.position), this.yaw);
+      // Pitched and banked with its vehicle.
+      if (a.basis) this.body.object.quaternion.setFromRotationMatrix(SEAT.makeBasis(SEAT_X.fromArray(bx), SEAT_Y.fromArray(by), SEAT_Z.fromArray(bz)));
+    }
+  }
+
+  /** An actor's one-shot clip ended: its root motion stays with it (falls and climbs too, not posture changes). */
+  private keepRootMotion(clip: number) {
+    const anim = this.body?.clips.clip(clip);
+    if (!anim || looping(anim) || !anim.root.length) return;
+    const a = rootAt(anim, 0);
+    const b = rootAt(anim, anim.duration);
+    const d: Vec3 = [b[0] - a[0], b[1] - a[1], Math.abs(b[2] - a[2]) > 1 * METRE ? b[2] - a[2] : 0];
+    if (this.anchor) {
+      this.rootShift = [this.rootShift[0] + d[0], this.rootShift[1] + d[1], this.rootShift[2] + d[2]];
+      return;
+    }
+    const c = Math.cos(this.yaw), s = Math.sin(this.yaw);
+    this.position = [this.position[0] + d[0] * c - d[1] * s, this.position[1] + d[0] * s + d[1] * c, this.position[2] + d[2]];
+  }
+
   private animate(dt: number) {
     const b = this.body;
     if (!b) return;
@@ -522,8 +578,13 @@ export class Soldier implements AiCharacter {
     // crouch-to-stand), so a one-shot also ends after one run of its clip; otherwise the soldier stayed busy forever and
     // never fired again.
     if (this.oneShot && b.clips.clipId === this.oneShot.id && (b.clips.finished || (this.oneShot.left -= dt) <= 0)) {
-      const then = this.oneShot.then;
+      const { then, id } = this.oneShot;
       this.oneShot = null;
+      if (this.actor) {
+        this.keepRootMotion(id);
+        // Cut straight to the next clip: a blend would show the root motion twice.
+        b.clips.play(this.baseClip, { blend: 0 });
+      }
       then?.();
     }
     if (!this.oneShot && b.clips.clipId !== this.baseClip) b.clips.play(this.baseClip);

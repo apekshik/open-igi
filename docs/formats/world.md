@@ -98,10 +98,7 @@ off at `cutoff x r'`.
   the stretch to waypoint i+1 (X → along the path, Y sideways, Z up), on a Catmull-Rom curve or straight lines when
   "Linear Segments" is set. Waypoint orientations and "areas" are not used.
 - `Train` (position, thrust, railroad task id, model, thrust step, max speed, flip, displacement x/y, sound) with child
-  `Train` tasks as wagons. Position is a distance along the railroad spline in world units (negative = still off the
-  track); flipped trains count from the far end. A train whose `AnimTask` has the run condition `"1"` starts moving at
-  load; others wait for a script (`WorldService.train(id).running = true`). Thrust read as m/s², MaxSpeed as km/h.
-  The AnimTask key data (which probably drives thrust) is not decoded.
+  `Train` tasks as wagons. See `dynamic.md` (Trains) for where a train starts, how it moves and what rides it.
 
 ## Terrain holes and level 14 (confirmed / open)
 

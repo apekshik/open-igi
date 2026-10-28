@@ -41,6 +41,11 @@ export interface CharacterSpec {
   patrols: Map<number, PatrolCommand[]>;
   /** Placed inside a cutscene or vehicle (not spawned with the level's soldiers). */
   scripted: boolean;
+  /**
+   * Part of an intro or outro cutscene (inside a ConditionalContainer named as one): an actor that plays its scripted
+   * animations and patrols while its containers run, without senses or fighting.
+   */
+  cutscene: boolean;
   /** The vehicle task type it rides in ("Heli", "Car", "Train", "AnimTask"), if any. */
   vehicle?: string;
   /**
@@ -94,7 +99,7 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
   // Patrol paths outside any soldier (level4 keeps its friendly team's routes in a shared "Patrol Paths" container).
   const sharedPatrols = new Map<number, PatrolCommand[]>();
 
-  function visit(task: QvmCall, scripted: boolean, gates: number[], generator?: CharacterSpec["generator"], vehicle?: string) {
+  function visit(task: QvmCall, scripted: boolean, gates: number[], generator?: CharacterSpec["generator"], vehicle?: string, inCutscene = false) {
     if (task.fn !== "Task_New") return;
     const [id, type, name, ...rest] = task.args;
     const t = String(type);
@@ -122,7 +127,7 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
     }
     // Ekk and Anya (level14) are HumanSoldierFemale tasks, with the same parameters as HumanSoldier.
     else if (t === "HumanSoldier" || t === "HumanSoldierFemale") {
-      characters.push({ ...character(tid, String(name), params, children, scripted), gates, generator, vehicle });
+      characters.push({ ...character(tid, String(name), params, children, scripted), gates, generator, vehicle, cutscene: inCutscene });
       return;
     }
     // Level 1 keeps its whole dynamic world in a container named "Cutscenes"; only the conditional cutscenes inside
@@ -132,7 +137,7 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
     const gated = t === "ConditionalContainer" && tid >= 0 ? [...gates, tid] : gates;
     const gen = t === "GuardGenerator" ? { taskId: tid, condition: String(params[0] ?? ""), maxSpawns: num(params[1]) || 1 } : generator;
     const ride = SCRIPTED_PARENTS.has(t) ? t : vehicle;
-    for (const c of children) visit(c, inside, gated, gen, ride);
+    for (const c of children) visit(c, inside, gated, gen, ride, inCutscene || cutscene);
   }
 
   for (const s of statements) visit(s, false, []);
@@ -147,6 +152,7 @@ function patrolCommands(children: QvmCall[]): PatrolCommand[] {
 function character(taskId: number, name: string, p: QvmValue[], children: QvmCall[], scripted: boolean): CharacterSpec {
   const spec: CharacterSpec = {
     gates: [],
+    cutscene: false,
     taskId,
     name,
     position: [num(p[0]), num(p[1]), num(p[2])],

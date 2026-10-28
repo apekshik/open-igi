@@ -52,6 +52,8 @@ export interface MissionWorld {
   ground?(x: number, y: number, z: number, ignoreTaskId?: number): { z: number; normal: Vec3 } | null;
   /** The world system's train for a Train task id, which the mission's AnimTasks drive. */
   train?(taskId: number): TrainControl | undefined;
+  /** Put a train back where the level places it (WorldService.resetTrain). */
+  resetTrain?(taskId: number): void;
   /** Model extents for vehicles: length along +Y and depth of the lowest point below the origin (world units). */
   modelExtent?(model: string): { length: number; bottom: number } | null;
   /** AIGraph route from near `from` to a node (AiService.graphRoute): undefined while loading, null if none. */
@@ -63,7 +65,7 @@ export interface TrainControl {
   /** Its task exists (its ConditionalContainer runs): shown, colliding and simulated. */
   active: boolean;
   running: boolean;
-  /** Thrust lever (AnimData channel 0), m/s² as the world system reads "Original thrust". */
+  /** Thrust lever (AnimData channel 0): 0..1 of the train's MaxSpeed. */
   throttle: number;
 }
 
@@ -928,7 +930,8 @@ export class CutSceneTask extends LogicTask {
     if (name === "nTick") return this.ticks;
     return undefined;
   }
-  private scale: number;
+  /** Time scale: camera key seconds per second. */
+  readonly scale: number;
   /** Seconds into the cutscene. */
   get seconds() {
     return this.ticks / GAME_FREQUENCY;
@@ -1787,6 +1790,11 @@ class TrainTask extends LogicTask {
     if (this.anim === undefined) {
       const id = this.node.id;
       this.anim = (this.L.tasks.find((t) => t instanceof AnimTaskTask && t.target === id) as AnimTaskTask | undefined) ?? null;
+    }
+    if (!train.active) {
+      // Its container (re)starts: the train enters play where the level places it, at its original thrust.
+      this.L.world.resetTrain?.(this.node.id);
+      this.throttle = pnum(this.node, "Original thrust");
     }
     train.active = true;
     if (this.anim) {

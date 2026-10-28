@@ -12,9 +12,24 @@ export interface WorldService {
   /**
    * A Train task by id: `running` starts or stops it (trains whose AnimTask condition is "1" start running), `position`
    * is the locomotive's distance along its railroad in world units, `active` shows or hides it (the mission system
-   * clears it while the train's ConditionalContainer is not running) and `throttle` is its thrust lever (m/s²).
+   * clears it while the train's ConditionalContainer is not running) and `throttle` is its thrust lever (0..1 of the
+   * train's MaxSpeed).
    */
   train(taskId: number): { active: boolean; running: boolean; throttle: number; position: number; speed: number } | undefined;
+  /**
+   * Car `index` (0 = the locomotive) of a Train task: its pose now (null while the train is hidden or the car is off
+   * the track) and where the level places it. Passengers and cutscene cameras placed with a train keep their offset
+   * from its car.
+   */
+  trainCar?(taskId: number, index: number): { current: TrainCarPose | null; reference: TrainCarPose | null } | undefined;
+  /** Put a train back where the level places it (its container starts again). */
+  resetTrain?(taskId: number): void;
   /** Draw-call relevant counts of the static world renderer, for profiling. */
   stats(): Record<string, number>;
+}
+
+/** A train car's pose in absolute IGI units: its origin and model axes (x along the track, y left, z up). */
+export interface TrainCarPose {
+  origin: Vec3;
+  axes: [Vec3, Vec3, Vec3];
 }

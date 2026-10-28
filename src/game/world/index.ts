@@ -116,6 +116,8 @@ export function worldSystem(): GameSystem {
         sun: { direction: env.sun.direction as Vec3, front: env.sun.front, back: env.sun.back },
         stats: () => ({ ...renderer.stats(), ...scene.lightMapStats }),
         train: (id) => trains.train(id),
+        trainCar: (id, index) => trains.car(id, index),
+        resetTrain: (id) => trains.reset(id),
       };
       game.services.world = service;
     },

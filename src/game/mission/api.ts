@@ -19,6 +19,17 @@ export interface UsePrompt {
   taskId: number;
 }
 
+/** Where a riding character sits now (MissionService.rider). */
+export interface RiderSeat {
+  /** Feet position, IGI units. */
+  position: Vec3;
+  yaw: number;
+  /** The vehicle is not in play: the rider is not shown. */
+  hidden?: boolean;
+  /** Body axes (right, forward, up) in IGI space, when the vehicle pitches or banks the rider with it. */
+  basis?: [Vec3, Vec3, Vec3];
+}
+
 export interface MissionService {
   /** Mission number (1..14), title and description from the language files. */
   number: number;
@@ -48,6 +59,12 @@ export interface MissionService {
   evaluate(expression: string, selfTaskId?: number): number | string;
   /** Write a task variable from an AI script (`EditVariable_173.nValue = 2`). Unknown or read-only names are ignored. */
   assign?(name: string, value: number): void;
+  /**
+   * A cutscene character riding a vehicle (its HumanSoldier inside a Heli/Car/Plane/Train task, or its AI graph in
+   * one): a function giving its seat now (feet position and heading; `hidden` while the vehicle is not in play), or
+   * null if it rides nothing. `aiId` is its HumanAI task id.
+   */
+  rider?(aiId: number): (() => RiderSeat) | null;
   /** Let an entity (an AI soldier) use a door or switch by task id. Returns false if not usable now. */
   use(entityId: number, taskId: number): boolean;
   /** Alarm pads (switches that set off an AlarmControl), for AI soldiers running to raise the alarm. */
