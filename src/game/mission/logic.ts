@@ -142,7 +142,7 @@ export function isUsable(t: LogicTask): t is LogicTask & Usable {
 /** Shared state for tasks that can be shot or blown up (the ExplodeObject parameter block). */
 export interface Explodable {
   /** Applied damage in IGI damage units; destroyed once it exceeds the object's "Damage scale". */
-  damage(amount: number): void;
+  damage(amount: number, part?: string): void;
   readonly exploded: boolean;
 }
 
@@ -321,11 +321,11 @@ export class MissionLogic {
   // ---- ticking
 
   /** Advance logic time by dt seconds (fixed GAME_FREQUENCY ticks). */
-  private vehicleAreaCentres: Vec3[] | null = null;
-  /** Centres of the CRITERIA_VEHICLE areas (scripted cars are guided into them). */
-  vehicleAreas(): Vec3[] {
-    this.vehicleAreaCentres ??= this.tasks.filter((t): t is AreaActivateTask => t instanceof AreaActivateTask && t.forVehicles).map((t) => t.center);
-    return this.vehicleAreaCentres;
+  private vehicleAreaTasks: AreaActivateTask[] | null = null;
+  /** The CRITERIA_VEHICLE areas (scripted cars are guided into them). */
+  vehicleAreas(): AreaActivateTask[] {
+    this.vehicleAreaTasks ??= this.tasks.filter((t): t is AreaActivateTask => t instanceof AreaActivateTask && t.forVehicles);
+    return this.vehicleAreaTasks;
   }
 
   /** How far the logic clock is into the next tick (0..1), for drawing moving objects between ticks. */
@@ -673,6 +673,8 @@ export class AreaActivateTask extends LogicTask {
     const ly = dx * s + dy * c;
     return Math.abs(lx) <= this.size[0] / 2 && Math.abs(ly) <= this.size[1] / 2 && Math.abs(p[2] - this.center[2]) <= this.size[2] / 2;
   }
+  /** Whether each scripted vehicle was inside at the last tick its task existed. */
+  private vehicleInside = new Map<LogicTask, boolean>();
   /** Whether the player was inside at the last tick its HumanPlayer task existed. */
   private playerInside = false;
 
@@ -682,7 +684,24 @@ export class AreaActivateTask extends LogicTask {
     const c = this.criteria;
     const all = this.L.world.entities();
     if (c === "CRITERIA_HUMAN1") this.count = all.filter((e) => e.team === 1 && isHuman(e) && inside(e)).length;
-    else if (c === "CRITERIA_VEHICLE") this.count = all.filter((e) => VEHICLE_KINDS.has(e.kind) && inside(e)).length;
+    else if (c === "CRITERIA_VEHICLE") {
+      // Scripted vehicles (Car/Heli/Plane tasks) keep their last answer while their task does not exist, like the
+      // player: Mission 7's outro runs on "AreaActivate_177.nActive" (the truck at the border) and its own start
+      // takes the truck's container down; dropping the count would stop the outro again at once.
+      let n = 0;
+      const counted = new Set<Entity>();
+      for (const t of this.L.tasks) {
+        if (!(t instanceof VehicleTask)) continue;
+        const e = this.L.world.byTask(t.node.id);
+        if (e) counted.add(e);
+        if (t.exploded) this.vehicleInside.delete(t);
+        else if (t.active && e) this.vehicleInside.set(t, inside(e));
+        if (this.vehicleInside.get(t)) n++;
+      }
+      // Vehicles that are not mission tasks (other systems' entities).
+      n += all.filter((e) => VEHICLE_KINDS.has(e.kind) && !counted.has(e) && inside(e)).length;
+      this.count = n;
+    }
     else {
       // CRITERIA_HUMAN0: the player's side. While the HumanPlayer task does not exist (intro and outro cutscenes)
       // the player keeps its last answer: outro containers test the very area that started them.
@@ -748,6 +767,10 @@ export class AnimTaskTask extends LogicTask {
       this.fresh.push(k);
     }
     this.ticks++;
+  }
+  /** Played some of its keys but not all: a paused drive (its Run condition went false on the way). */
+  get paused(): boolean {
+    return !this.running && this.ticks > 0 && this.next < this.keys.length;
   }
   /** Keys since the last call. */
   take(): { channel: number; value: number }[] {
@@ -982,7 +1005,7 @@ export abstract class ObjectTask extends LogicTask implements Explodable {
   get physical(): boolean {
     return !!this.model && this.model.toLowerCase() !== "waypoint";
   }
-  damage(amount: number) {
+  damage(amount: number, _part?: string) {
     if (this.exploded || this.fuse >= 0 || !this.destructible || !this.physical) return;
     this.health -= amount;
     if (this.health <= 0) this.trigger();
@@ -1576,9 +1599,16 @@ export class ElevatorTask extends ObjectTask {
   }
 }
 
+/** How far ahead a paused scripted car still rolls into a vehicle area, and how fast. */
+const SETTLE_RANGE = 60 * METRE;
+const SETTLE_SPEED = 2.5 * METRE;
+
 /** CarAI drivers' default speed and how close a route point counts as reached. */
 const CARAI_SPEED = (30 / 3.6) * METRE;
 const CARAI_REACH = 4 * METRE;
+
+/** Share of a bullet's damage a vehicle takes (armour, engine block, tyres: it takes explosives to destroy one). */
+const BULLET_FACTOR = 0.02;
 
 /** Health of vehicles, in the player's health-bar units that damage events carry (3 = one full bar). */
 const VEHICLE_HEALTH: Record<VehicleKind, number> = { car: 12, heli: 9, plane: 9 };
@@ -1596,6 +1626,7 @@ export class VehicleTask extends ObjectTask {
   private anim: AnimTaskTask | null | undefined;
   private spec: VehicleSpec | null = null;
   private released = new Map<number, number>();
+  private visitedAreas = new Set<AreaActivateTask>();
   /** CarAI driver: PatrolPath commands over an AIGraph (see docs/formats/ai.md for the command ids). */
   private driver: { graph: number; commands: [number, number][]; ip: number; loop: number; route: Vec3[] | null; speed: number; delay: number; done: boolean } | null = null;
   private driverInputs = new Map<number, number>();
@@ -1616,9 +1647,15 @@ export class VehicleTask extends ObjectTask {
   get destructible() {
     return true;
   }
-  damage(amount: number) {
+  /**
+   * `part` is what the damage event names: a surface material for a bullet striking the body (physics reports the hit
+   * face's material), "torso"/undefined for blasts. Small-arms fire barely scratches a vehicle: Mission 7's hamlet
+   * guards shoot at the truck Jones rides through, and the level fails if it explodes.
+   */
+  damage(amount: number, part?: string) {
     if (this.exploded) return;
-    this.health -= (amount / VEHICLE_HEALTH[this.kind]) * 100;
+    const bullet = part !== undefined && part !== "torso";
+    this.health -= ((bullet ? amount * BULLET_FACTOR : amount) / VEHICLE_HEALTH[this.kind]) * 100;
     if (this.health <= 0) this.explode();
   }
   protected explode() {
@@ -1654,9 +1691,47 @@ export class VehicleTask extends ObjectTask {
       for (const k of anim.take()) applyKey(this.state, this.kind, k.channel, k.value);
       inputs = anim.inputs;
     } else if (this.driver && this.kind === "car") inputs = this.drive();
+    else if (anim?.paused && this.kind === "car") inputs = this.settle();
     const ground = this.L.world.ground;
     stepVehicle(this.state, this.spec, inputs, 1 / GAME_FREQUENCY, (x, y, z) => ground?.(x, y, z, this.node.id) ?? null);
-    if (this.kind === "car" && anim?.running) guideCar(this.state, this.L.vehicleAreas(), 1 / GAME_FREQUENCY);
+    if (this.kind === "car" && anim?.running) {
+      // Each vehicle area guides a car until the car has been inside it, then the next one ahead takes over.
+      const areas = this.L.vehicleAreas();
+      for (const a of areas) if (a.contains(this.state.position)) this.visitedAreas.add(a);
+      guideCar(this.state, areas.filter((a) => !this.visitedAreas.has(a)).map((a) => a.center), 1 / GAME_FREQUENCY);
+    }
+  }
+
+  /**
+   * A scripted drive paused by its level script waits for the car to sit in a vehicle area (Mission 7's truck must stand
+   * 10 s in the hamlet strip before its AnimTask resumes). The original stops there by its recorded brake; ours may
+   * stop a few metres short, so a paused car rolls on at walking pace into a vehicle area just ahead and stops inside.
+   */
+  private settle(): ReadonlyMap<number, number> {
+    const inputs = this.driverInputs;
+    const pos = this.state.position;
+    const heading = this.state.orientation[2];
+    let target: Vec3 | null = null;
+    let reverse = false;
+    let best = SETTLE_RANGE;
+    for (const a of this.L.vehicleAreas()) {
+      if (a.contains(pos)) {
+        target = null;
+        break;
+      }
+      const dx = a.center[0] - pos[0];
+      const dy = a.center[1] - pos[1];
+      const d = Math.hypot(dx, dy);
+      const off = Math.abs(wrapAngle(Math.atan2(-dx, dy) - heading));
+      // Ahead: roll on into it; straight behind (it stopped just past it): back up into it.
+      if (d < best && (off < 1.2 || off > Math.PI - 0.6)) {
+        best = d;
+        target = a.center;
+        reverse = off > Math.PI / 2;
+      }
+    }
+    autopilot(this.state, target, SETTLE_SPEED, inputs, reverse);
+    return inputs;
   }
 
   /** One tick of the CarAI driver: run PatrolPath commands, steer along the current route. */

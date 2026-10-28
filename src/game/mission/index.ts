@@ -78,7 +78,7 @@ export function missionSystem(): GameSystem {
       cleanup.push(
         game.events.on("damage", (d) => {
           const t = objects.entityTasks.get(d.targetId);
-          if (t) t.damage(d.amount);
+          if (t) t.damage(d.amount, d.part);
         }),
       );
       // Exploding objects: a full health bar of damage per 100 (the player's bar is maxHealth IGI damage units).
