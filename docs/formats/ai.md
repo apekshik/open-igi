@@ -117,6 +117,10 @@ end (its walk is re-planned). Actions queued without it are replaced. So Priboi 
 carries on along his path, and soldiers go back to a pushable patrol after a fight. Unarmed characters that are not
 civilians take cover (crouch 4-6 s) instead of fighting.
 
+A walking character that gains less than 0.5 m on its next route point over 2 s moves on to the point after it. The
+per-frame stuck rule missed characters jittering in a corner (sliding along one wall, pushed back by another): Mission
+10's Priboi froze by the warehouse roof on his way back along "Priboi legs it1".
+
 ## Stationary guns (StationaryGun tasks)
 
 Position, Orientation (3 angles, the third the heading), Holder model (123_02_1), Weapon ID (WEAPON_ID_M2HB), Max up

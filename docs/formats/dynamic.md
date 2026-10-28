@@ -40,6 +40,10 @@ stays true while the car waits, and a call button's close pulse must still shut 
 AI soldiers open closed, unlocked doors they walk into (the AI graphs mark doorways with `NODECRITERIA_DOOR` nodes and
 `AIEVENT_DOOR` reaches the scripts via the door sound); locked doors stay shut to them.
 
+A door closed with the use key onto someone standing in its way (player or soldier overlapping the leaf) opens again:
+the leaf used to push Jones into its hull, where he could not walk out (Mission 10, warehouse door 256). Closes from a
+`Close door expression` (elevator doors) are not undone, or a guard beside the lobby doors would keep a car waiting.
+
 ## Elevators
 
 The car (`Model`) rides its `SplineObj`'s waypoints (floors). Calls are one-tick pulses (`Switch.isLastPressed`) that

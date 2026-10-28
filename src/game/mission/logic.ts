@@ -1092,6 +1092,8 @@ export class DoorTask extends ObjectTask implements Usable {
   private openWas = false;
   private closeWas = false;
   private lastOpen = false;
+  /** Closing because of its Close door expression (elevator doors): such a close is not undone by someone in the way. */
+  scriptedClose = false;
 
   get destructible() {
     return false;
@@ -1128,7 +1130,10 @@ export class DoorTask extends ObjectTask implements Usable {
     this.openWas = open;
     this.closeWas = close;
     if (openEdge && this.open < 1) this.startMove(1);
-    else if (closeEdge && this.open > 0) this.startMove(-1);
+    else if (closeEdge && this.open > 0) {
+      this.startMove(-1);
+      this.scriptedClose = true;
+    }
     if (this.moving !== 0) {
       this.open = Math.min(1, Math.max(0, this.open + this.moving / (this.openTime * GAME_FREQUENCY)));
       if ((this.moving > 0 && this.open >= 1) || (this.moving < 0 && this.open <= 0)) {
@@ -1167,6 +1172,7 @@ export class DoorTask extends ObjectTask implements Usable {
       this.picked = true;
       return;
     }
+    this.scriptedClose = false;
     this.startMove(this.open > 0.5 || this.moving > 0 ? -1 : 1);
   }
   /** Door model transform at an opening (default: the current one): slide along local X/Y or swing about Z by Max angle. */

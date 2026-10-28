@@ -263,7 +263,7 @@ export class MissionObjects {
       v.group.updateMatrix();
       v.collider.setMatrix(v.group.matrix.elements);
       v.collider.enabled = v.group.visible;
-      if (t instanceof DoorTask && t.moving < 0) this.reopenIfBlocked(t, v.collider);
+      if (t instanceof DoorTask && t.moving < 0 && !t.scriptedClose) this.reopenIfBlocked(t, v.collider);
     }
     v.entity.position = pos;
     v.entity.alive = !t.exploded && t.active && !!model;
