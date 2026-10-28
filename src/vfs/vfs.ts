@@ -30,9 +30,12 @@ export function vfsFromFiles(files: FileList | File[]): Vfs {
   };
 }
 
-/** Dev only: files served by the Vite middleware from $IGI_DATA (see vite.config.ts). */
-export async function vfsFromDevServer(): Promise<Vfs | null> {
-  const res = await fetch("/__igi/index.json").catch(() => null);
+/**
+ * Files served over HTTP as `<base>index.json` (the lowercased paths) and `<base>file/<path>`: the Vite middleware
+ * from $IGI_DATA in dev (see vite.config.ts), or a private build that ships its owner's copy (scripts/private.mjs).
+ */
+export async function vfsFromDevServer(base = "/__igi/"): Promise<Vfs | null> {
+  const res = await fetch(`${base}index.json`).catch(() => null);
   if (!res?.ok) return null;
   const paths: string[] = await res.json();
   const set = new Set(paths.map(norm));
@@ -40,7 +43,7 @@ export async function vfsFromDevServer(): Promise<Vfs | null> {
     has: (p) => set.has(norm(p)),
     list: () => [...set],
     async read(p) {
-      const r = await fetch(`/__igi/file/${norm(p)}`);
+      const r = await fetch(`${base}file/${norm(p)}`);
       if (!r.ok) throw new Error(`not found: ${p}`);
       return new Uint8Array(await r.arrayBuffer());
     },
