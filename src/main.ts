@@ -1,7 +1,8 @@
-// Research viewers over the player's install: ?view=level (default), ?view=models or ?view=textures or ?view=sounds.
+// Entry point: ?view=play runs the game; ?view=level (default), models, textures and sounds are research viewers.
 import { vfsFromDevServer, vfsFromFiles, type Vfs } from "./vfs/vfs.ts";
 import { levelViewer } from "./viewer/level.ts";
 import { modelViewer } from "./viewer/models.ts";
+import { playView } from "./viewer/play.ts";
 import { soundViewer } from "./viewer/sounds.ts";
 import { textureViewer } from "./viewer/textures.ts";
 
@@ -19,7 +20,8 @@ function start() {
   toolbar.replaceChildren();
   stage.replaceChildren();
   const view = viewSelect.value;
-  if (view === "textures") textureViewer(vfs, toolbar, stage, status);
+  if (view === "play") playView(vfs, toolbar, stage, status);
+  else if (view === "textures") textureViewer(vfs, toolbar, stage, status);
   else if (view === "sounds") soundViewer(vfs, toolbar, stage, status);
   else if (view === "level") levelViewer(vfs, toolbar, stage, status);
   else modelViewer(vfs, toolbar, stage, status);

@@ -1,18 +1,10 @@
 // Level view: the terrain plus every model placed by the level's objects.qvm, with a fly camera starting at the player.
 // WASD/QE to move (shift = fast), drag to look.
 import * as THREE from "three";
-import { decodeQvm } from "../formats/qvm.ts";
-import { decodeTexArray } from "../formats/tex.ts";
-import { parseBit, parseCtr, parseHmp, parseLmp, terrainMaterials } from "../formats/terrain.ts";
-import { levelObjects, type LevelObjects } from "../level/objects.ts";
-import { cubeMinAt, type TerrainData } from "../level/terrain.ts";
-import { levelLibrary } from "../render/library.ts";
+import { loadLevel, METRE } from "../level/load.ts";
 import { TerrainRenderer } from "../render/terrain.ts";
 import type { Vfs } from "../vfs/vfs.ts";
 import { createStage, levelNames } from "./stage.ts";
-
-/** IGI units per metre (2^12; see THIRD_PARTY.md, flawme). */
-const METRE = 4096;
 
 export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, status: (s: string) => void) {
   const params = new URLSearchParams(location.search);
@@ -83,13 +75,12 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
     status(`loading ${level}...`);
     world.clear();
     terrain = null;
-    const library = await levelLibrary(vfs, level);
-    const objects = levelObjects(decodeQvm(await vfs.read(`missions/location0/${level}/objects.qvm`)));
+    const { library, objects, terrain: terrainInputs } = await loadLevel(vfs, level);
     origin = objects.playerStart ?? objects.placements[0]?.position ?? [0, 0, 0];
 
     const t0 = performance.now();
     terrain = new TerrainRenderer({
-      ...(await loadTerrain(vfs, level, objects)),
+      ...terrainInputs,
       origin,
       radius: 6000 * METRE,
       minLevel: 7,
@@ -136,24 +127,4 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
 
   levelSelect.addEventListener("change", () => load(levelSelect.value));
   if (levels.length) load(levelSelect.value);
-}
-
-async function loadTerrain(vfs: Vfs, level: string, objects: LevelObjects) {
-  const dir = `missions/location0/${level}/terrain`;
-  const read = (name: string) => vfs.read(`${dir}/${name}`);
-  const hmp = vfs.has(`${dir}/terrain.hmp`) ? parseHmp(await read("terrain.hmp")) : [];
-  const bit = parseBit(await read("terrain.bit"));
-  const data: TerrainData = {
-    ctr: parseCtr(await read("terrain.ctr")),
-    cmd: await read("terrain.cmd"),
-    patches: objects.heightMaps
-      .filter((h) => hmp[h.id])
-      .map((h) => ({ level: h.level, min: cubeMinAt(h.position, h.level), size: h.size, heights: hmp[h.id]! })),
-    modifiers: objects.textureModifiers
-      .filter((m) => bit[m.bitmap])
-      .map((m) => ({ level: m.level, min: cubeMinAt(m.position, m.level), material: m.material, size: m.size, bits: bit[m.bitmap]!.bits })),
-    lightMaps: objects.terrainLightMaps.map((l) => ({ level: l.level, min: cubeMinAt(l.position, l.level), size: l.size, index: l.index })),
-    materials: terrainMaterials(decodeQvm(await read("terrain.qvm"))),
-  };
-  return { data, textures: decodeTexArray(await read("terrain.tex")), lightMaps: parseLmp(await read("terrain.lmp")) };
 }
