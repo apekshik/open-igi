@@ -65,3 +65,14 @@ names for the 33-bone rigs agree with the bone order documented in `docs/FORMATS
 ## fflate
 
 [fflate](https://github.com/101arrowz/fflate) (MIT) inflates entries when importing a game zip.
+
+## World rendering: sky, fog and level of detail
+
+The sky and fog in `src/render/sky.ts` and `src/game/world/environment.ts` follow hjcminus/Project-IGI-Terrain (MIT,
+licence above): the sky dome's shape and colour interpolation (`source/renderer/renderer_skydome.cpp`), the flat cloud
+layers' plane, UV mapping and distance fade (`source/level/flat_sky_layer.cpp`), which `FlatSky`, `FlatSkyLayer` and
+`GlobalLightKeyframe` parameters feed them (`source/level/level.cpp`), and its mapping of fog density to fog distance.
+
+flawme/igi-reverse-engineering (MIT) identified `pc/lod.qvm` as the per-model LOD table (`reverse/docs/14-lod-system`),
+which `src/game/world/statics.ts` reads. The `.olm` lightmap layout, the lightmap-to-model order, `LTMP` and `ATTA` are
+our own reading of the data (`docs/formats/world.md`).
