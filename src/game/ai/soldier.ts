@@ -155,6 +155,13 @@ export class Soldier implements AiCharacter {
   viewAlpha = 50;
   viewGamma = 45;
   alarmControlId = -1;
+  /** A specific task (usually an alarm switch) to activate instead of the alarm control's nearest pad. */
+  alarmTriggerId = -1;
+  alarmAccess = "AIALARMACCESS_BEFORECOMBAT";
+  /** AIFunction_SetDeathAnimation: a fixed death clip, or -1. */
+  deathAnimation = -1;
+  /** AIFunction_SetGunnerID: the stationary gun this character mans. */
+  gunnerId = -1;
   invulnerable = false;
   instantDeath = false;
   ints: number[] = [];
@@ -276,10 +283,14 @@ export class Soldier implements AiCharacter {
       AIFunction_SetAlarmControlID: (v) => void (this.alarmControlId = n(v)),
       AIFunction_SetInvulnerability: (v) => void (this.invulnerable = !!n(v)),
       AIFunction_SetInstantDeath: (v) => void (this.instantDeath = !!n(v)),
-      AIFunction_GetAlarmTriggerID: () => this.alarmControlId,
+      AIFunction_SetAlarmTriggerID: (v) => void (this.alarmTriggerId = n(v)),
+      AIFunction_GetAlarmTriggerID: () => (this.alarmTriggerId >= 0 ? this.alarmTriggerId : this.alarmControlId),
       AIFunction_GetAlarmControlID: () => this.alarmControlId,
-      // No script sets the access mode; IGI's guards run for the alarm before they fight.
-      AIFunction_GetAlarmAccess: () => "AIALARMACCESS_BEFORECOMBAT",
+      // Scripts that never set it run for the alarm before they fight.
+      AIFunction_SetAlarmAccess: (v) => void (this.alarmAccess = String(v)),
+      AIFunction_GetAlarmAccess: () => this.alarmAccess,
+      AIFunction_SetDeathAnimation: (v) => void (this.deathAnimation = n(v)),
+      AIFunction_SetGunnerID: (v) => void (this.gunnerId = n(v)),
       AIFunction_GetAlarmControlStatus: () => Number(this.world.alarmOn),
       AIFunction_GetAlarmTriggerDistance: () => {
         const p = this.world.taskPosition(this.alarmControlId);
@@ -300,7 +311,7 @@ export class Soldier implements AiCharacter {
         this.actions = this.actions.filter((a) => !(a instanceof ActivateAction));
       },
       AIFunction_SendResponse: () => this.shout(),
-      AIFunction_GetGunnerID: () => -1,
+      AIFunction_GetGunnerID: () => this.gunnerId,
       AIFunction_GetGunnerStatus: () => 0,
       AIAction_Patrol: (path, start) => {
         const commands = this.spec.patrols.get(n(path));
@@ -317,6 +328,7 @@ export class Soldier implements AiCharacter {
       AIAction_LookAtEvent: () => void queued.push(lookAtEvent()),
       AIAction_Dead: () => void queued.push(dead()),
       AIAction_RunToNode: (node) => void queued.push(toNode(n(node), "run")),
+      AIAction_FireAtTask: (task, rounds, seconds) => void queued.push(fireAtTask(n(task), n(rounds), n(seconds))),
       AIAction_WalkToNode: (node) => void queued.push(toNode(n(node), "walk")),
     };
     return natives;
@@ -412,8 +424,12 @@ export class Soldier implements AiCharacter {
     this.world.shoot(this, origin, dir);
   }
 
-  /** Where to go to set off alarm control `id`: the nearest alarm pad when the mission system knows them. */
+  /**
+   * Where to go to activate task `id`: the task itself when it is the alarm trigger or a gun to man, otherwise (an
+   * alarm control) the nearest alarm pad when the mission system knows them.
+   */
   alarmTarget(id: number): Vec3 | undefined {
+    if (id === this.alarmTriggerId || id === this.gunnerId) return this.world.taskPosition(id);
     const pads = this.game.services.mission?.alarmPads() ?? [];
     let best: Vec3 | undefined;
     for (const pad of pads) if (!best || dist(pad.position, this.position) < dist(best, this.position)) best = pad.position;
@@ -733,7 +749,8 @@ function dead(part?: string, from?: Vec3 | null): Action {
         started = true;
         const front = from ? Math.abs(wrap(yawTo(s.position, from) - s.yaw)) < Math.PI / 2 : true;
         const clip =
-          s.stance === "prone" ? CLIP.deathProne
+          s.deathAnimation >= 0 && s.body?.clips.clip(s.deathAnimation) ? s.deathAnimation
+          : s.stance === "prone" ? CLIP.deathProne
           : s.stance === "crouch" ? CLIP.deathCrouch
           : part === "head" ? pick(CLIP.deathHead)
           : pick(front ? CLIP.deathsFront : CLIP.deathsBack);
@@ -807,7 +824,7 @@ function toNode(node: number, gait: "walk" | "run"): Action {
   };
 }
 
-/** Run to an alarm panel and set the alarm off. */
+/** Run to a task and activate it: raise the alarm at an alarm pad, or use it (a switch, a stationary gun). */
 class ActivateAction implements Action {
   state: AiState = "combat";
   private started = false;
@@ -817,7 +834,8 @@ class ActivateAction implements Action {
     this.task = task;
   }
   update(s: Soldier, dt: number) {
-    if (s.game.services.ai?.alarm) return true;
+    const alarm = this.task !== s.gunnerId;
+    if (alarm && s.game.services.ai?.alarm) return true;
     const p = s.alarmTarget(this.task);
     if (!p) return true;
     if (!this.started) {
@@ -831,9 +849,35 @@ class ActivateAction implements Action {
       s.turnTowards(yawTo(s.position, p), 1);
     }
     if ((this.pressing -= dt) > 0) return false;
-    s.raiseAlarm();
+    if (alarm) s.raiseAlarm();
+    else s.game.services.mission?.use(s.id, this.task);
     return true;
   }
+}
+
+/** AIAction_FireAtTask(task, rounds, seconds, ...): shoot at a task's position (scripted suppression fire). */
+function fireAtTask(task: number, rounds: number, seconds: number): Action {
+  let left = Math.max(1, rounds);
+  let wait = 0;
+  let hold = Math.max(0.5, seconds);
+  return {
+    state: "combat",
+    update(s, dt) {
+      const p = s.taskPosition(task) ?? s.eventPosition;
+      if (!p || !s.weapon) return true;
+      s.stopMoving();
+      s.setBase(left > 0 ? CLIP.fire : CLIP.aim);
+      if (!s.turnTowards(yawTo(s.position, p), dt, 4)) return false;
+      if (left > 0 && (wait -= dt) <= 0) {
+        const eye = s.eye();
+        const target: Vec3 = [p[0] + (rand() - 0.5) * METRE, p[1] + (rand() - 0.5) * METRE, p[2] + rand() * METRE];
+        s.shoot(eye, vec3.normalize(vec3.sub(target, eye)));
+        left--;
+        wait = 60 / Math.max(1, s.weapon.roundsPerMinute);
+      }
+      return left <= 0 && (hold -= dt) <= 0;
+    },
+  };
 }
 
 /** PatrolPath commands (PatrolPathCommand "Command" ids, named by the editor notes in objects.qvm). */

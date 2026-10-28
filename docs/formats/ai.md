@@ -60,8 +60,10 @@ horizontal half-angle) and `SetViewAlpha(50)` (vertical); snipers see 100 m in a
 
 How we run them (`src/game/ai/script.ts`, `soldier.ts`): an event runs the scripts unless the actions queued by a
 higher-ranked event are still running; `AIAction_SetCombat` posts `AIEVENT_COMBAT`, whose handler queues
-`AIAction_Activate(alarm)` (run to the alarm pad) and/or `AIAction_Combat`. `AIFunction_GetAlarmAccess` is never set by
-any script; we answer `AIALARMACCESS_BEFORECOMBAT`. Clip ids in the scripts (`PlayAnimation(36)` after a near miss,
+`AIAction_Activate(alarm)` (run to the alarm pad) and/or `AIAction_Combat`. Level scripts may pick the alarm
+switch (`SetAlarmTriggerID`), the timing (`SetAlarmAccess`, default `AIALARMACCESS_BEFORECOMBAT` when unset), a fixed
+death clip (`SetDeathAnimation(85)`), a stationary gun to man (`SetGunnerID`) and scripted fire
+(`AIAction_FireAtTask(task, rounds, seconds, ...)`; argument meanings are our reading). Clip ids in the scripts (`PlayAnimation(36)` after a near miss,
 `37` when the noise is behind, `39` stunned by a flashbang) are soldier-skeleton (001.iff) ids.
 
 ## common/ai/settings.qvm
