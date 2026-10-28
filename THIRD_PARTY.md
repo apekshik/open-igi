@@ -50,6 +50,9 @@ Its `.iff` animation notes (`reverse/docs/16-verified-formats`: the chunk table,
 `PLST` parents, `TLST` rest translations, `BALH[0]` = animation count, and loader evidence that playback slerps
 quaternion keys) are the basis of `src/formats/anim.ts`.
 
+The same project's audio notes (`reverse/docs/09-audio`, `reverse/tools/misc.py`) document the ILSF sound container and
+its IMA ADPCM codec, which `src/formats/ilsf.ts` implements.
+
 ## heaven-hm/project-igi-converter
 
 <https://github.com/heaven-hm/project-igi-converter>, Heaven-HM Community Modding License (noncommercial,

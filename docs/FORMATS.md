@@ -11,7 +11,7 @@ Reference install: the English PC release (`IGI.exe`, 1,384,448 bytes), 1,940 fi
 | ext | count | MB | magic | status | reader |
 |---|---:|---:|---|---|---|
 | .res | 92 | 274.5 | `ILFF` / `IRES` | confirmed (container) | `src/formats/ilff.ts` |
-| .wav | 394 | 47.1 | `ILSF` | unknown | |
+| .wav | 394 + 346 in archives | 47.1 | `ILSF` | confirmed (PCM and IMA ADPCM) | `src/formats/ilsf.ts` |
 | .dat | 317 | 35.2 | `0xccddeeff` / text | unknown | |
 | .tex | 26 loose + ~6,900 in archives | 7.2 | `LOOP` | v11 confirmed | `src/formats/tex.ts` |
 | .ctr / .cmd / .hmp | 14 / 14 / 6 | ~13 | none | terrain geometry confirmed | `src/formats/terrain.ts` |
@@ -206,18 +206,6 @@ Big-endian IFF `FORM` of type `MTP ` (sizes big-endian, payloads little-endian, 
 A model's material slot `i` uses texture `TEXF[INST.texIndex[i]]`. In all 14 levels, the records are sequential,
 `n` equals the model's material count, every index is in range, and the records consume `INST` exactly.
 
-## ILSF sound (partial)
-
-```
-0  "ILSF"
-4  u16 codec?       1 in common/sounds, 2 in mission dialogue (payload of 2 does not look like PCM)
-6  u16 bits         16
-8  u32 channels     1
-12 u32 sampleRate   22050
-16 u32 dataSize
-20 data
-```
-
 ## .qvm compiled script (confirmed)
 
 `LOOP` version 8. Compiled from QSC source (the `.qsc` files are not shipped). `src/formats/qvm.ts` decodes all 997
@@ -394,3 +382,24 @@ morph factor, and child vertices blend between their own and their parent's mate
 The original draws three passes: the first material's near texture opaque, every other layer additively with
 per-vertex weights summing to 1, then the lightmap multiplied in as `1/3 + 2/3 × lightmap`. Texture rows are
 stored top-down with v=0 at the first row, for both ground textures and lightmaps.
+
+## ILSF (sounds)
+
+Every sound is ILSF, not RIFF: the loose `.wav` files (e.g. `missions/location0/level*/sounds/`) and the `BODY` entries of
+`common/sounds/sounds.res` and `menusystem/SOUND/sounds.res`. Header and codec follow flawme/igi-reverse-engineering
+(`reverse/docs/09-audio`, see THIRD_PARTY.md); `src/formats/ilsf.ts` decodes them to Float32 PCM.
+
+```
+"ILSF"  u16 version  u16 bits (always 16)  u16 channels (1|2)  u16 flags  u32 sampleRate  u32 frames  data @ 0x14
+```
+
+`version` is a bitfield: bit 0 = inside a `.res` (the `.res` ones carry flags 0x1002, loose ones 0; flags are unused),
+bit 1 = compressed. So v0/v1 are 16-bit little-endian interleaved PCM and v2/v3 are 4-bit IMA ADPCM. `frames` is
+samples per channel (not the byte size). The ADPCM stream has no block headers: one nibble per sample, high nibble
+first, channels interleaved nibble by nibble, predictor 0 and step index 0 at the start, standard IMA step table.
+Data is `frames*channels*2` bytes (PCM) or `ceil(frames*channels/2)` bytes (ADPCM); a zero pad byte may follow.
+
+**Check:** all 740 ILSF sounds in the install (394 loose, 346 in archives) decode with the payload size matching the
+header exactly (538 exact, 202 with one pad byte). Mix: v0 3, v1 338, v2 410, v3 8; 11025/22050/44100 Hz, mono and
+stereo. No file is silent (RMS 0.009 to 0.50); the loudest explosions clip on up to 5% of samples, as mastered. Mission
+dialogue decodes as speech (about 3000 zero crossings/s, 4 to 6 Hz syllabic envelope, 13 to 70x loud/quiet dynamics).
