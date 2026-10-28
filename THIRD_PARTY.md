@@ -105,3 +105,10 @@ from `IGI.exe`, the damage rule (hit-zone multiplier x Damage Factor, AI dying a
 (head 100) and the player's threshold and zone table in `DefineHumanPlayerGeneral`, which `src/formats/weapon.ts` and
 `src/game/weapons/` use. The view-model rig, ATTA records, animation tick rate, sprite layout, spread units and
 everything else in `docs/formats/weapons.md` are our own reading.
+
+## flawme/igi-reverse-engineering: mission logic
+
+The same project's task-system and level-system notes (`reverse/docs/11-task-system`, `reverse/docs/12-level-system`:
+the `language/*.res` files and `LevelFlow_GetBreakCutSceneKey` among the script natives) guided the mission system in
+`src/game/mission/`. The value of `GAME_FREQUENCY` (30) was read from IGI.exe's script constant table by us; the
+remaining task semantics come from reading the levels' own objects.qvm scripts. See `docs/formats/mission.md`.
