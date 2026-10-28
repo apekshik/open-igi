@@ -416,7 +416,7 @@ class Player implements PlayerService {
     let grounded: boolean;
     if (physics) {
       // On a ladder only the real shapes hold the body: towers' movement hulls close over their ladders.
-      const r = physics.move(feet, delta, this.entity.radius, this.entity.height, climbing ? { ignoreHulls: true } : undefined);
+      const r = physics.move(feet, delta, this.entity.radius, this.entity.height, { ignoreHulls: climbing, entityId: this.entity.id });
       next = r.position;
       grounded = r.grounded;
     } else {

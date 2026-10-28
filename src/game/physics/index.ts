@@ -67,6 +67,12 @@ export function physicsSystem(): GameSystem {
   };
 }
 
+/** Is a model-space feet point over the collider's footprint (and not far above or below it)? */
+function insideFootprint(bounds: readonly number[], p: readonly number[], radius: number): boolean {
+  const m = radius * 0.5;
+  return p[0] >= bounds[0] - m && p[0] <= bounds[3] + m && p[1] >= bounds[1] - m && p[1] <= bounds[4] + m && p[2] >= bounds[2] - 0.5 * METRE && p[2] <= bounds[5];
+}
+
 /** Entity kinds that ride platforms and get pushed by moving colliders. */
 const RIDERS = new Set(["player", "soldier", "civilian", "human"]);
 
@@ -163,6 +169,8 @@ export class IgiPhysics implements PhysicsService {
   private colliders = new Map<number, DynamicBody & { model: string }>();
   private collisionCache = new Map<string, ModelCollision | null>();
   private stats = { colliders: 0, moved: 0, carried: 0, pushed: 0, ms: 0 };
+  /** The collider each rider was carried by last frame: riders stay on while inside its footprint. */
+  private riding = new WeakMap<object, DynamicBody>();
 
   addDynamic(model: string, matrix: ArrayLike<number>, options?: { entityId?: number }): DynamicCollider | null {
     let collision = this.collisionCache.get(model);
@@ -242,11 +250,16 @@ export class IgiPhysics implements PhysicsService {
         // Where the point attached to the collider's old pose is now.
         toLocal(body.carried, p[0] - gx, p[1] - gy, p[2] - gz, a);
         toWorld(body.matrix, a[0], a[1], a[2], b);
-        if (this.world.supports(body, body.carried, p, e.radius)) {
+        // Riders stay with the collider they were on while their feet are inside its footprint, even when the support
+        // test slips (a truck bed pitching up a steep hill); stepping off its edge releases them.
+        const sticky = this.riding.get(e) === body && insideFootprint(body.localBounds, a, e.radius);
+        if (sticky || this.world.supports(body, body.carried, p, e.radius)) {
           e.position = [b[0] + gx, b[1] + gy, b[2] + gz];
+          this.riding.set(e, body);
           done.add(e);
           carried++;
         } else {
+          if (this.riding.get(e) === body) this.riding.delete(e);
           const push = this.world.pushOut(body, p, e.radius, e.height, [b[0] + gx - p[0], b[1] + gy - p[1]]);
           if (push) {
             e.position = [p[0] + push[0], p[1] + push[1], p[2]];
@@ -265,7 +278,9 @@ export class IgiPhysics implements PhysicsService {
   }
 
   move(feet: Vec3, delta: Vec3, radius: number, height: number, options?: MoveOptions): MoveResult {
-    const r = this.world.move(feet, delta, radius, height, options);
+    const rider = options?.entityId === undefined ? undefined : this.game.entities.get(options.entityId);
+    const ridingBody = rider ? this.riding.get(rider)?.id : undefined;
+    const r = this.world.move(feet, delta, radius, height, ridingBody === undefined ? options : { ...options, ridingBody });
     return { position: r.position, grounded: r.grounded, ground: this.groundHit(r.ground) ?? undefined };
   }
 }

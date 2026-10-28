@@ -78,6 +78,8 @@ export interface MoveOptions {
   walkableZ?: number;
   /** Collide with real shapes only, not the grown human hulls (ladder climbing: hulls close over ladders). */
   ignoreHulls?: boolean;
+  /** The entity moving: while it rides a moving collider, that collider's hull is ignored (truck beds, lifts). */
+  entityId?: number;
 }
 
 export interface MoveResult {

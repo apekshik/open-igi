@@ -82,6 +82,11 @@ export interface MoveOptions {
   walkableZ?: number;
   /** Move against the real shapes only, not the grown human hulls (climbing a ladder through a tower's hull). */
   ignoreHulls?: boolean;
+  /**
+   * Dynamic body the mover is riding. Only that body collides (vehicles drive through the world without colliding, so
+   * their passengers must too), and with its real shape, not its hull (a truck's hull encloses its cargo bed).
+   */
+  ridingBody?: number;
 }
 
 export interface MoveResult {
@@ -127,11 +132,30 @@ class Candidates {
     this.body[i] = body;
   }
 
-  /** Remove the candidates of one kind, keeping the order of the rest. */
-  drop(kind: number) {
+  /** Keep only one dynamic body's candidates. */
+  keepBody(body: number) {
     let j = 0;
     for (let i = 0; i < this.n; i++) {
-      if (this.kind[i] === kind) continue;
+      if (this.body[i] !== body) continue;
+      if (i !== j) {
+        this.pos.copyWithin(j * 9, i * 9, i * 9 + 9);
+        this.normal.copyWithin(j * 3, i * 3, i * 3 + 3);
+        this.box.copyWithin(j * 6, i * 6, i * 6 + 6);
+        this.kind[j] = this.kind[i];
+        this.material[j] = this.material[i];
+        this.object[j] = this.object[i];
+        this.body[j] = this.body[i];
+      }
+      j++;
+    }
+    this.n = j;
+  }
+
+  /** Remove the candidates of one kind (of one dynamic body, if given), keeping the order of the rest. */
+  drop(kind: number, body?: number) {
+    let j = 0;
+    for (let i = 0; i < this.n; i++) {
+      if (this.kind[i] === kind && (body === undefined || this.body[i] === body)) continue;
       if (i !== j) {
         this.pos.copyWithin(j * 9, i * 9, i * 9 + 9);
         this.normal.copyWithin(j * 3, i * 3, i * 3 + 3);
@@ -374,6 +398,10 @@ export class CollisionWorld {
     );
     const c = this.cand;
     if (options.ignoreHulls) c.drop(KIND_HULL);
+    else if (options.ridingBody !== undefined) {
+      c.keepBody(options.ridingBody);
+      c.drop(KIND_HULL, options.ridingBody);
+    }
 
     const steps = Math.min(256, Math.max(1, Math.ceil(Math.max(Math.hypot(dx, dy), Math.abs(dz)) / (Math.max(hullRadius, 1) * 0.5))));
     let grounded = false;
