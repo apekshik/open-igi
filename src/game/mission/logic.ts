@@ -870,7 +870,7 @@ export abstract class ObjectTask extends LogicTask implements Explodable {
     this.exploded = true;
     this.fuse = -1;
     const radius = pnum(this.node, "Explosion radius") * METRE;
-    this.L.emit("explosion", {
+    this.L.emit("object:explode", {
       taskId: this.node.id,
       position: this.worldPosition(),
       radius,

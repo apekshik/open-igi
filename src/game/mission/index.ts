@@ -58,7 +58,7 @@ export function missionSystem(): GameSystem {
       };
       cleanup.push(game.events.on("mission:sound", (e) => sound(e.sound, e.position)));
       cleanup.push(game.events.on("door:move", (e) => sound(e.sound, e.position)));
-      cleanup.push(game.events.on("explosion", (e) => sound(e.sound, e.position)));
+      cleanup.push(game.events.on("object:explode", (e) => sound(e.sound, e.position)));
       cleanup.push(game.events.on("generator", (e) => sound(e.sound, null)));
       cleanup.push(game.events.on("elevator", (e) => sound(e.sound, null)));
 
@@ -69,10 +69,21 @@ export function missionSystem(): GameSystem {
           if (t) t.damage(d.amount);
         }),
       );
-      // Explosions hurt everything in range (and set off other explodables: chain reactions).
+      // Exploding objects: a full health bar of damage per 100 (the player's bar is maxHealth IGI damage units).
+      // The weapons system owns blasts (damage falloff, cover, effects, noise); without it, damage directly.
+      // Damage reaching other explodables sets them off: chain reactions.
       cleanup.push(
-        game.events.on("explosion", (x) => {
+        game.events.on("object:explode", (x) => {
           if (x.radius <= 0 || x.damage <= 0) return;
+          const bar = game.services.player?.entity.maxHealth ?? 3;
+          const damage = (x.damage / 100) * bar;
+          const weapons = game.services.weapons;
+          if (weapons?.explode) {
+            // Level data: full damage within "falloff", fading to 0 at "radius". Weapons: fade band width.
+            const reach = Math.max(x.radius, x.falloff);
+            weapons.explode(x.position, null, reach, reach - x.falloff, damage, "object");
+            return;
+          }
           const reach = Math.max(x.radius, x.falloff);
           for (const e of game.entities.all()) {
             if (!e.alive || objects.entityTasks.get(e.id)?.node.id === x.taskId) continue;
@@ -80,7 +91,7 @@ export function missionSystem(): GameSystem {
             const d = vec3.distance(center, x.position);
             if (d > reach) continue;
             const f = d <= x.falloff ? 1 : 1 - (d - x.falloff) / Math.max(1, reach - x.falloff);
-            game.events.emit("damage", { targetId: e.id, amount: x.damage * f, sourceId: null, point: center, direction: vec3.normalize(vec3.sub(center, x.position)) });
+            game.events.emit("damage", { targetId: e.id, amount: damage * f, sourceId: null, point: center, direction: vec3.normalize(vec3.sub(center, x.position)) });
           }
           game.events.emit("noise", { position: x.position, radius: 150 * METRE, sourceId: null, kind: "explosion" });
         }),

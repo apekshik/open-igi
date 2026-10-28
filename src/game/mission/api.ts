@@ -57,13 +57,16 @@ declare module "../events.ts" {
   interface GameEvents {
     /** StatusMessageScreen_ClearMessages(): scripts clear the message list when gameplay starts. */
     "status:clear": Record<string, never>;
-    /** An objects.qvm object exploded (ExplodeObject, Terminal, Generator, ...). Radii in world units. */
-    explosion: {
+    /**
+     * An objects.qvm object exploded (ExplodeObject, Terminal, Generator, ...). Radii in world units. The mission
+     * system turns it into a weapons-system blast (damage, effects, "explosion" and "noise" events).
+     */
+    "object:explode": {
       taskId: number;
       position: Vec3;
       radius: number;
       falloff: number;
-      /** Damage at the centre (100 = a full health bar). */
+      /** Damage at the centre as the level's "Explosion damage scale" x 100 (100 = a full health bar). */
       damage: number;
       sound: string;
       fragments: number;
