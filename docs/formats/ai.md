@@ -144,6 +144,11 @@ and gun go) when one of them stops, and spawns afresh if it runs again. Cutscene
 only through `AiService.spawn(taskId, { passenger: { anchor } })`: passive (no senses, no fighting) and carried by the
 anchor every frame. No system exposes Heli, Car or Train transforms yet, so nothing calls it.
 
+## Spacing
+
+A soldier whose route ends where a comrade stands or is heading stops 1.2-2 m beside it instead, and walking soldiers
+are pushed apart within 0.9 m (chosen; QA saw guards stacking on one spot in level 12).
+
 ## Friendly fire
 
 Nothing in the data says whether soldiers' bullets hurt their own side. In play-testing they killed each other in

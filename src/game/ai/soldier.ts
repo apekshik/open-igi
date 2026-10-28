@@ -693,7 +693,58 @@ export class Soldier implements AiCharacter {
       }
       points = cut;
     }
+    // Comrades heading for (or standing on) the same spot: stop beside them, not on top of them.
+    const last = points.length ? points[points.length - 1] : null;
+    if (last) points[points.length - 1] = this.freeSpot(last);
     this.route = { points, i: 0 };
+  }
+
+  /** The route's end, for comrades choosing where to stand. */
+  get destination(): Vec3 | null {
+    return this.route ? this.route.points[this.route.points.length - 1] : null;
+  }
+
+  /** `p`, or a point 1.2-2 m around it when a comrade stands there or is heading there. */
+  private freeSpot(p: Vec3): Vec3 {
+    const taken = (q: Vec3) =>
+      this.world.characters().some((o) => {
+        if (o === this || !o.alive) return false;
+        const at = o.destination ?? o.position;
+        return Math.hypot(at[0] - q[0], at[1] - q[1]) < 1.1 * METRE && Math.abs(at[2] - q[2]) < 2 * METRE;
+      });
+    if (!taken(p)) return p;
+    const physics = this.game.services.physics;
+    for (let k = 0; k < 8; k++) {
+      const a = (this.id * 2.4 + k * Math.PI / 4) % (Math.PI * 2);
+      const r = (1.2 + (k & 1) * 0.8) * METRE;
+      const q: Vec3 = [p[0] + Math.cos(a) * r, p[1] + Math.sin(a) * r, p[2]];
+      const z = physics?.groundHeight(q[0], q[1], p[2] + 1 * METRE);
+      if (z === null || z === undefined || Math.abs(z - p[2]) > 0.6 * METRE) continue;
+      q[2] = z;
+      if (!taken(q) && (!physics || physics.lineOfSight([p[0], p[1], p[2] + METRE], [q[0], q[1], q[2] + METRE]))) return q;
+    }
+    return p;
+  }
+
+  /** Sideways push away from comrades closer than 0.9 m, so soldiers walking the same way do not merge. */
+  private separation(): [number, number] {
+    let x = 0, y = 0;
+    for (const o of this.world.characters()) {
+      if (o === this || !o.alive) continue;
+      const dx = this.position[0] - o.position[0], dy = this.position[1] - o.position[1];
+      const d = Math.hypot(dx, dy);
+      const min = 0.9 * METRE;
+      if (d >= min || Math.abs(this.position[2] - o.position[2]) > 1.5 * METRE) continue;
+      const f = (min - d) / min;
+      if (d < 1) {
+        x += Math.cos(this.id) * f;
+        y += Math.sin(this.id) * f;
+      } else {
+        x += (dx / d) * f;
+        y += (dy / d) * f;
+      }
+    }
+    return [x, y];
   }
 
   get moving() {
@@ -719,7 +770,9 @@ export class Soldier implements AiCharacter {
     const before = this.position;
     if (physics) {
       this.fall = Math.min(this.fall + 9.8 * METRE * dt, 30 * METRE);
-      const delta: Vec3 = d > 0 ? [(dx / d) * step, (dy / d) * step, -this.fall * dt] : [0, 0, -this.fall * dt];
+      const [sx, sy] = this.separation();
+      const push = 1.5 * METRE * dt;
+      const delta: Vec3 = d > 0 ? [(dx / d) * step + sx * push, (dy / d) * step + sy * push, -this.fall * dt] : [sx * push, sy * push, -this.fall * dt];
       const moved = physics.move(this.position, delta, this.radius, this.height);
       this.position = moved.position;
       if (moved.grounded) this.fall = 0;
