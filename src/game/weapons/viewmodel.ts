@@ -242,13 +242,11 @@ export class ViewModel {
     return a ? a.duration / ANIM_TICKS_PER_SECOND : 0;
   }
 
-  /** Play an arm animation once (or looped), cross-fading from the current pose. */
+  /** Play an arm animation once (or looped), cross-fading from the current pose. False if the weapon has no such animation. */
   play(id: number, options: { loop?: boolean; speed?: number; onEnd?: () => void } = {}): boolean {
     const anim = this.anim(id);
-    if (!anim) {
-      options.onEnd?.();
-      return false;
-    }
+    // Missing animation: the caller carries on without it (onEnd is not called).
+    if (!anim) return false;
     this.start(anim, options.loop ?? false, options.speed ?? 1);
     this.onEnd = options.onEnd ?? null;
     return true;

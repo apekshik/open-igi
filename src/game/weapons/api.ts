@@ -52,7 +52,10 @@ export interface WeaponsService {
   select(weaponId: string): boolean;
   /** Current zoom view, for the HUD (also sent as "weapon:zoom" events). */
   zoom(): { kind: ZoomKind; fov: number };
-  /** Draw the built-in binocular/scope overlay (the UI may turn this off and draw its own on "weapon:zoom"). */
+  /**
+   * Draw the built-in binocular/scope overlay from the game's sprites. Off by default: the HUD draws the optics from
+   * "weapon:zoom" events (declared in src/game/hud/api.ts). Useful when running without the HUD.
+   */
   drawOverlay: boolean;
 
   /**
@@ -77,8 +80,6 @@ export interface WeaponsService {
 
 declare module "../events.ts" {
   interface GameEvents {
-    /** The player's zoom view changed; `fov` is the field of view in degrees. */
-    "weapon:zoom": { ownerId: number; kind: ZoomKind; fov: number; weapon: string };
     /** The player's weapon in hand changed (null = none). */
     "weapon:switch": { ownerId: number; weapon: string | null };
     "weapon:reload": { ownerId: number; weapon: string };

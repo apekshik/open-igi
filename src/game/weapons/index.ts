@@ -56,6 +56,16 @@ const RELOAD_PARTS: Record<string, number> = {
 };
 /** Spread multiplier by what Jones's legs are doing (not in the data; IGI rewards standing still and crouching). */
 const GAIT_SPREAD: Record<string, number> = { idle: 1, crouch: 1.2, crawl: 1.2, walk: 1.6, run: 2.5, air: 3, ladder: 3 };
+/** common/sounds/bul_<family>_<n>.wav by game material, and how many variants each family has. */
+const IMPACT_SOUNDS: Record<string, string> = {
+  concrete: "concrete", wood: "wood", glass: "glass", fence: "metal_fnc", strongmetal: "metal_hrd", normalmetal: "metal_nrm",
+  softmetal: "metal_sft", gravel: "gravel", ground: "gravel", snow: "gravel", carton: "carton", textiles: "textile",
+  rug: "rug", plastic: "plastic", porcelain: "porc", rubber: "rubber", runway: "asphalt", asphalt: "asphalt", flesh: "flesh",
+};
+const IMPACT_PARTS: Record<string, number> = {
+  asphalt: 2, carton: 3, concrete: 2, flesh: 5, glass: 4, gravel: 3, metal_fnc: 2, metal_hrd: 3, metal_nrm: 3, metal_sft: 4,
+  plastic: 1, porc: 4, rubber: 1, rug: 2, textile: 1, wood: 7,
+};
 const SLOT_KEYS: Action[] = ["weapon1", "weapon2", "weapon3", "weapon4", "weapon5", "weapon6", "weapon7", "weapon8", "weapon9"];
 const FIREARMS = new Set(["GUN", "PISTOL", "SHOTGUN"]);
 const THROWN = new Set(["GRENADE", "PROXIMITYMINE"]);
@@ -94,7 +104,7 @@ export function weaponsSystem(): GameSystem {
 }
 
 class Arsenal implements WeaponsService {
-  drawOverlay = true;
+  drawOverlay = false;
   private game: Game;
   private data!: WeaponData;
   private effects!: Effects;
@@ -341,7 +351,7 @@ class Arsenal implements WeaponsService {
         if (i === 0 || Math.random() < 0.15) this.effects.blood(hit.point, physics?.groundHeight(hit.point[0], hit.point[1], hit.point[2]) ?? null);
       } else {
         this.effects.impact(hit.point, hit.normal, false);
-        if (surfaceSounds++ < 2) this.impactSound(hit.point, hit.part);
+        if (surfaceSounds++ < 2) this.impactSound(hit.point, hit.material ?? hit.part);
       }
       this.game.events.emit("weapon:impact", { ownerId, weapon: spec.id, point: hit.point, normal: hit.normal, entityId: hit.entityId, part: hit.part });
     }
@@ -366,7 +376,7 @@ class Arsenal implements WeaponsService {
       this.effects.impact(hit.point, vec3.scale(dir, -1), true);
       this.applyFactor(target.id, spec.damage * this.zone(target, hit.part) * scale, ownerId, hit.point, dir, hit.part);
     } else {
-      this.impactSound(hit.point, hit.part);
+      this.impactSound(hit.point, hit.material ?? hit.part);
     }
     return { hits: [{ point: hit.point, entityId: hit.entityId, part: hit.part }] };
   }
@@ -595,13 +605,12 @@ class Arsenal implements WeaponsService {
     return out;
   }
 
+  /** Bullet impact sound by the physics surface material (material/material.qvm names). */
   private impactSound(point: Vec3, material?: string) {
-    const m = (material ?? "").toLowerCase();
-    const family =
-      /metal|steel|iron/.test(m) ? "metal_nrm" : /wood/.test(m) ? "wood" : /glass/.test(m) ? "glass" : /gravel|sand|dirt|ground|terrain|grass|snow/.test(m) ? "gravel" : /asphalt/.test(m) ? "asphalt" : "concrete";
-    const counts: Record<string, number> = { metal_nrm: 3, wood: 7, glass: 4, gravel: 3, asphalt: 2, concrete: 2 };
-    this.sound(`bul_${family}_${1 + Math.floor(Math.random() * counts[family])}`, point, 25 * METRE, 0.8);
-    if (Math.random() < 0.12) this.sound(`riccochet_${1 + Math.floor(Math.random() * 5)}`, point, 40 * METRE, 0.6);
+    const family = IMPACT_SOUNDS[(material ?? "").toLowerCase()] ?? "concrete";
+    this.sound(`bul_${family}_${1 + Math.floor(Math.random() * (IMPACT_PARTS[family] ?? 1))}`, point, 25 * METRE, 0.8);
+    const hard = family === "concrete" || family.startsWith("metal") || family === "asphalt";
+    if (hard && Math.random() < 0.15) this.sound(`riccochet_${1 + Math.floor(Math.random() * 5)}`, point, 40 * METRE, 0.6);
   }
 
   // ----------------------------------------------------------------------------------------- the player's weapon
@@ -736,7 +745,9 @@ class Arsenal implements WeaponsService {
     if (this.viewModel) this.viewModel.hidden = kind === "binoculars" || kind === "scope";
     if (this.drawOverlay && kind) this.overlay.show(kind, this.zoomFov, this.baseFov);
     else this.overlay.hide();
-    this.game.events.emit("weapon:zoom", { ownerId: this.playerId, kind, fov: this.zoomFov, weapon: this.binoculars ? "WEAPON_ID_BINOCULARS" : (this.held ?? "") });
+    // The HUD (src/game/hud/api.ts) draws the optics from this; a plain zoom (MP5SD) has no overlay.
+    const zoom = Math.tan(deg(this.baseFov) / 2) / Math.tan(deg(this.zoomFov) / 2);
+    this.game.events.emit("weapon:zoom", { mode: kind === "binoculars" || kind === "scope" ? kind : "none", zoom: kind ? zoom : 1 });
   }
 
   private zoomBase(): number {

@@ -1,6 +1,6 @@
 // Built-in zoom overlays (binoculars, sniper scope) drawn from the game's own sprites, plus the flashbang white-out.
 // common/sprites/binoculars.spr is the left eyepiece (mirrored for the right one, stretched to full height) and
-// snipersight.spr the top-left quarter of the scope ring (mirrored into four). The UI may draw its own and set `drawOverlay = false`.
+// snipersight.spr the top-left quarter of the scope ring (mirrored into four). Used when `drawOverlay` is on (the HUD normally draws the optics).
 import type { ZoomKind } from "./api.ts";
 import { spriteCanvas, type Sprite } from "./sprite.ts";
 

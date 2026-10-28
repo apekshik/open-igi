@@ -96,3 +96,12 @@ the point. flawme/igi-reverse-engineering's `.mef` notes (`reverse/docs/16-verif
 gave the collision chunk sizes, the `CMSH` descriptor layout (counts on disk, pointers at run time), the `CFCE`
 record and the `MESH` collision totals at `+0x6C`/`+0x70`, which `src/formats/collision.ts` builds on (see
 `docs/formats/collision.md`).
+
+## Weapons (flawme/igi-reverse-engineering)
+
+flawme/igi-reverse-engineering's weapon notes (`reverse/docs/06-weapons`, `reverse/data/weapon_parameters.tsv`,
+`reverse/data/weapon_table.tsv`, MIT) give the names and positional binding of `DefineWeaponType`'s arguments and,
+from `IGI.exe`, the damage rule (hit-zone multiplier x Damage Factor, AI dying at 1.0), the AI hit-zone multipliers
+(head 100) and the player's threshold and zone table in `DefineHumanPlayerGeneral`, which `src/formats/weapon.ts` and
+`src/game/weapons/` use. The view-model rig, ATTA records, animation tick rate, sprite layout, spread units and
+everything else in `docs/formats/weapons.md` are our own reading.
