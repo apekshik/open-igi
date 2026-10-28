@@ -120,3 +120,9 @@ AI level scripts read task variables (`HumanSoldier_404.isDead`) and also write 
 `EditCamera` keys run back to back for their `Duration`. `Gamma` is the heading (same convention as ours, 0 = +Y),
 `Alpha` the pitch measured from straight down (−π/2 = horizon), `Beta` the roll. `FOV` 1 is taken as 90° horizontal.
 A `Target task ID` makes the key look at that task. `Smooth to next` interpolates to the next key.
+
+### Restarting a ConditionalContainer
+
+When a ConditionalContainer starts running again after having run before, everything inside it restarts from its
+initial state, as in the original engine (e.g. Mission 9's train section aborting after the alarm). Each logic task
+snapshots its plain-data fields once at construction; `MissionLogic.restartSubtree` restores them.
