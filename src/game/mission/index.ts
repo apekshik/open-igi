@@ -4,7 +4,7 @@
 import { direction, METRE, vec3, type Vec3 } from "../coords.ts";
 import type { GameSystem } from "../game.ts";
 import type { MissionService, Objective, UsePrompt } from "./api.ts";
-import { CutSceneTask, isUsable, MissionLogic, type LogicTask, type Usable } from "./logic.ts";
+import { CutSceneTask, DoorTask, isUsable, MissionLogic, type LogicTask, type Usable } from "./logic.ts";
 import { MissionObjects } from "./objects.ts";
 import { pvec, taskTree } from "./tasks.ts";
 import { briefingLines, loadStrings, missionInfo } from "./text.ts";
@@ -146,6 +146,16 @@ export function missionSystem(): GameSystem {
           return true;
         },
         alarmPads: () => logic.alarmSwitches().map((s) => ({ taskId: s.node.id, position: s.worldPosition() })),
+        door: (entityId) => {
+          const t = objects.entityTasks.get(entityId);
+          return t instanceof DoorTask && t.active ? { open: t.open, moving: t.moving, locked: t.isLocked() } : null;
+        },
+        openDoor: (_entityId, doorEntityId) => {
+          const t = objects.entityTasks.get(doorEntityId);
+          if (!(t instanceof DoorTask) || !t.active || !t.physical || t.isLocked()) return false;
+          if (t.open < 1 && t.moving <= 0) t.startMove(1);
+          return true;
+        },
       };
       game.services.mission = service;
 

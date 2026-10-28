@@ -52,6 +52,13 @@ export interface MissionService {
   use(entityId: number, taskId: number): boolean;
   /** Alarm pads (switches that set off an AlarmControl), for AI soldiers running to raise the alarm. */
   alarmPads(): { taskId: number; position: Vec3 }[];
+  /**
+   * A door's state by its entity id (entities of kind "door"; most Door tasks have no task id), or null for other
+   * entities and doors whose task is not in play: `open` 0 (closed) .. 1 (open), `moving` -1 closing / 0 / 1 opening.
+   */
+  door(entityId: number): { open: number; moving: number; locked: boolean } | null;
+  /** An AI soldier opens a door by entity id (as the use key does, without picking locks). False if it cannot. */
+  openDoor(userEntityId: number, doorEntityId: number): boolean;
 }
 
 // Events the mission system emits, in addition to objective/alarm/message/mission:end/pickup (events.ts).
