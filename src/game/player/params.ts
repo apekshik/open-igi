@@ -86,6 +86,8 @@ export interface PlayerData {
   materials: Map<string, GroundMaterial>;
   /** Footstep event times (animation ticks, 4800/s) per clip id of skeleton 000, from the clips' BOED chunks. */
   footsteps: Map<number, number[]>;
+  /** Hand-and-foot step events (type 8) of the ladder clips: 168 (climb) has two per cycle, 170 (off the top) four. */
+  ladderSteps: Map<number, number[]>;
 }
 
 const num = (v: QvmValue | undefined, fallback: number) => (typeof v === "number" ? v : fallback);
@@ -132,10 +134,12 @@ export function readMaterials(calls: QvmCall[]): Map<string, GroundMaterial> {
 
 /**
  * Footstep events of every clip in an .iff animation file. Each BOAN's BOED holds 24-byte events
- * `{u32 type, u32 bone, f32 time, vec3 offset}`; type 1010 is a footstep (the bone is the foot that lands).
+ * `{u32 type, u32 bone, f32 time, vec3 offset}`; type 1010 is a footstep (the bone is the foot that lands). Type 8
+ * marks the steps of the ladder clips (168, 170) and the crawl (172); the reload clips use the AnimTrigger ids
+ * of animtrigger.qvm (1000+) instead.
  * src/formats/anim.ts skips BOED, so this reads the chunk stream itself with the same flat walk.
  */
-export function readFootsteps(bytes: Uint8Array): Map<number, number[]> {
+export function readFootsteps(bytes: Uint8Array, type = 1010): Map<number, number[]> {
   const out = new Map<number, number[]>();
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const tag = (at: number) => String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
@@ -153,7 +157,7 @@ export function readFootsteps(bytes: Uint8Array): Map<number, number[]> {
     if (t === "BOAH") id = view.getUint32(p + 8, true);
     else if (t === "BOED") {
       const times: number[] = [];
-      for (let o = 0; o + 24 <= size; o += 24) if (view.getUint32(p + o, true) === 1010) times.push(view.getFloat32(p + o + 8, true));
+      for (let o = 0; o + 24 <= size; o += 24) if (view.getUint32(p + o, true) === type) times.push(view.getFloat32(p + o + 8, true));
       if (times.length) out.set(id, times);
     }
     at += 8 + size + (size & 1);
@@ -164,8 +168,13 @@ export function readFootsteps(bytes: Uint8Array): Map<number, number[]> {
 export async function loadPlayerData(vfs: Vfs): Promise<PlayerData> {
   const [human, material] = await Promise.all([script(vfs, "humanplayer/humanplayer.qvm"), script(vfs, "material/material.qvm")]);
   let footsteps = new Map<number, number[]>();
-  if (vfs.has("common/anims/000.iff")) footsteps = readFootsteps(await vfs.read("common/anims/000.iff"));
-  return { params: readParams(human), materials: readMaterials(material), footsteps };
+  let ladderSteps = new Map<number, number[]>();
+  if (vfs.has("common/anims/000.iff")) {
+    const anims = await vfs.read("common/anims/000.iff");
+    footsteps = readFootsteps(anims);
+    ladderSteps = readFootsteps(anims, 8);
+  }
+  return { params: readParams(human), materials: readMaterials(material), footsteps, ladderSteps };
 }
 
 export function groundMaterial(data: PlayerData, name: string | undefined): GroundMaterial {

@@ -128,8 +128,11 @@ export async function collectStatics(
     if (depth < 4) {
       (library.lighting(model)?.attachments ?? []).forEach((a, i) => {
         if (!library.has(a.model)) return;
+        // ATTA's nine floats are the sub-model's axes one after another (columns of its rotation): read as rows,
+        // every attachment turned 90° faced backwards (wall lamps sank into their walls, roof ladders hooked away
+        // from the roof; mission/objects.ts found the same for rotor hubs). 0°/180° ones read the same either way.
         const r = a.rotation;
-        const m = new THREE.Matrix4().set(r[0], r[1], r[2], a.position[0], r[3], r[4], r[5], a.position[1], r[6], r[7], r[8], a.position[2], 0, 0, 0, 1);
+        const m = new THREE.Matrix4().set(r[0], r[3], r[6], a.position[0], r[1], r[4], r[7], a.position[1], r[2], r[5], r[8], a.position[2], 0, 0, 0, 1);
         node.attachments.push(attach(a.model, matrix.clone().multiply(m), i, depth + 1));
       });
     }

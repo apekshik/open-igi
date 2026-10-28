@@ -67,7 +67,7 @@ export interface MefLighting {
   portals: boolean;
 }
 
-// ATTA: 68-byte records: char[16] model name, vec3 position, f32[9] rotation (rows), u32 0.
+// ATTA: 68-byte records: char[16] model name, vec3 position, f32[9] rotation (the x, y, z axes: columns), u32 0.
 const ATTA_RECORD = 68;
 
 export function readMefLighting(bytes: Uint8Array): MefLighting {

@@ -183,8 +183,10 @@ with it (the tail cameras and in-cabin closeups of the insertion helicopters, th
 Climbable ladders are not marked by a collision material (no model uses `MetalLadder`; Mission 4's water-tower ladder
 `435_02_1` is tagged Fence). `magicobj/magicobj.qvm` lists them as `TASKTYPE_LADDER`: 314_01_1, 211_01_1, 400_17_1,
 400_18_1, 402_02_1, 402_07_1, 417_02_1, 423_02_1, 422_03_1, 435_02_1, 240_01_1, 413_02_1. Physics reports
-`RayHit.ladder` for them. A ladder's movement hull stands about 0.76 m proud of its rungs and the structure's decks
-close over it, so the player grabs within 1.3 m, hugs the rungs at 0.4 m and climbs through decks.
+`RayHit.ladder` for them and lists them as `PhysicsService.ladders`. Levels place them as ATTA attachments of the
+building or tower they serve (see world.md for the ATTA rotation), so the player finds them by walking the static
+objects' attachments. A ladder's movement hull stands about 0.76 m proud of its rungs and the structure's decks close
+over it; the climb itself follows the animation (player.md, Ladders) rather than the collision.
 
 ## Terrain
 

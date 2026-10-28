@@ -76,9 +76,13 @@ parts, a few rooms in levels 12-14) are skipped by resynchronising on image size
 
 - **`LTMP`** (type 3): `u16 width, u16 height, u32 0` — the lightmap the second UV set (`VRTX` +32, 0..1) is laid out
   for. Some models carry an empty `LTMP` (no lightmap).
-- **`ATTA`**: 68-byte records `char[16] model, vec3 position, f32[9] rotation (rows), u32 0`. Sub-models a model brings
+- **`ATTA`**: 68-byte records `char[16] model, vec3 position, f32[9] rotation, u32 0`. Sub-models a model brings
   with it, in its own model space: building interiors (`403_02_1` ... rooms with portals), lamps, windows, railings,
-  furniture. They are not tasks in objects.qvm, so nothing else places them. Attachments can have attachments.
+  furniture, ladders. They are not tasks in objects.qvm, so nothing else places them. Attachments can have attachments.
+  The nine floats are the sub-model's x, y and z axes in turn (the rotation's columns). Read as rows, every attachment
+  turned by 90° faces backwards. Mission 4 shows it plainly: read as rows, 30 of 38 `207_01_1` wall lamps sink into
+  their walls; read as columns, none do and 30 have their backs within 7 cm of a wall. The security building's
+  `400_18_1` ladder hooked away from the roof it climbs to, while its 180°-turned twin `400_17_1` hooks onto it.
 - **REND** type 3 header `u16` @18 is 0 or 1; not a lightmap page (single-page lightmaps use both). Unknown.
 
 ## Level of detail (inferred)

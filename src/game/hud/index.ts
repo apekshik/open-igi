@@ -68,6 +68,22 @@ const ACTION_SPRITES: Record<HudAction, string> = {
   button: "action_pressbutton",
 };
 
+/** Prompt text for actions the HUD is told about directly. */
+const ACTION_TEXT: Partial<Record<HudAction, string>> = { ladder: "Climb ladder" };
+
+/** The icon for a mission use prompt (the texts of src/game/mission/logic.ts's Usable tasks). */
+function promptAction(text: string): HudAction {
+  if (/lock/i.test(text)) return "picklock";
+  if (/door/i.test(text)) return "door";
+  if (/computer/i.test(text)) return "computer";
+  if (/switch|button/i.test(text)) return "button";
+  if (/explosive|c4/i.test(text)) return "c4";
+  if (/cabinet/i.test(text)) return "cabinet";
+  if (/wire/i.test(text)) return "wire";
+  if (/fence/i.test(text)) return "fence";
+  return "gun";
+}
+
 const weaponKey = (id: string) => id.replace(/^WEAPON_ID_/, "").toUpperCase();
 
 interface Notice {
@@ -408,14 +424,33 @@ class Hud {
     }
   }
 
+  /**
+   * IGI's context icon under the crosshair: what the use key would do (the player reports ladders through
+   * action(); doors, switches, computers and pickups come from the mission's use prompt), with its text below.
+   */
   private drawAction(W: number, H: number) {
-    if (!this.currentAction) return;
-    const icon = this.sprite(ACTION_SPRITES[this.currentAction]);
-    if (icon) this.ctx.drawImage(icon.frames[0], Math.round(W / 2 - icon.width / 2), Math.round(H / 2 + 24));
+    const prompt = this.game.services.mission?.prompt() ?? null;
+    const kind = this.currentAction ?? (prompt ? promptAction(prompt.text) : null);
+    if (!kind) return;
+    const icon = this.sprite(ACTION_SPRITES[kind]);
+    const y = Math.round(H / 2 + 24);
+    if (icon) this.ctx.drawImage(icon.frames[0], Math.round(W / 2 - icon.width / 2), y);
+    const text = this.currentAction ? ACTION_TEXT[this.currentAction] : prompt?.text;
+    if (text) this.font4.draw(this.ctx, text, W / 2, y + (icon?.height ?? 0) + 4, { color: HUD_GREEN, align: "center" });
   }
 
   private drawProgress(W: number, H: number) {
-    if (this.progressValue === null) return;
+    // A timed use (pick lock, hack, plant C4) fills the bar while F is held.
+    if (this.progressValue === null) {
+      const prompt = this.game.services.mission?.prompt();
+      if (prompt && prompt.progress > 0) {
+        this.progressValue = prompt.progress;
+        this.progressLabel = prompt.text;
+        this.drawProgress(W, H);
+        this.progressValue = null;
+      }
+      return;
+    }
     const bar = this.sprite("progressbar");
     const ctx = this.ctx;
     const w = bar?.width ?? 240;
