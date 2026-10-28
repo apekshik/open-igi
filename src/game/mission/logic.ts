@@ -40,6 +40,8 @@ export interface MissionWorld {
   lineOfSight(from: Vec3, to: Vec3): boolean;
   /** AI awareness of a soldier task (HumanAI.isDetection): true when it has noticed the player. */
   aiDetects(soldierTaskId: number): boolean;
+  /** How many guards a GuardGenerator task has spawned (the AI system spawns them). Optional for Node tests. */
+  aiSpawns?(generatorTaskId: number): number;
   /** Text by key (StatusMessage Text, objective texts). */
   text(key: string): string | undefined;
 }
@@ -1425,7 +1427,11 @@ class GuardGeneratorTask extends LogicTask {
   isOn = false;
   field(name: string) {
     if (name === "isOn") return this.isOn ? 1 : 0;
-    if (name === "nSpawns" || name === "isSpawned") return 0; // spawning reinforcements is the AI system's job
+    if (name === "nSpawns" || name === "isSpawned") {
+      // The AI system spawns the guards; scripts read how many came.
+      const n = this.L.world.aiSpawns?.(this.node.id) ?? 0;
+      return name === "nSpawns" ? n : n > 0 ? 1 : 0;
+    }
     return undefined;
   }
   tick() {

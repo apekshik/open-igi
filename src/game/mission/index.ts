@@ -41,6 +41,7 @@ export function missionSystem(): GameSystem {
             const c = ai()?.characters().find((ch) => ch.taskId === taskId);
             return !!c && c.alive && (c.state === "alert" || c.state === "combat");
           },
+          aiSpawns: (taskId) => ai()?.generatorSpawns(taskId) ?? 0,
           text: (key) => strings.get(key),
         },
         (type, payload) => game.events.emit(type, payload),
