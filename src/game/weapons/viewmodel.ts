@@ -8,7 +8,7 @@
 import * as THREE from "three";
 import { poseBones, type AnimFile, type Animation } from "../../formats/anim.ts";
 import { parseIlff } from "../../formats/ilff.ts";
-import { decodeMef, skinMef, tagName, type MefModel } from "../../formats/mef.ts";
+import { skinMef, tagName, type MefModel } from "../../formats/mef.ts";
 import type { WeaponSpec } from "../../formats/weapon.ts";
 import type { ModelLibrary } from "../../render/library.ts";
 
@@ -376,11 +376,3 @@ function depthClearer(): THREE.Object3D {
   return m;
 }
 
-/** Decode a model's .mef bytes from a library's archives (for ATTA), via the level's VFS lookup. */
-export function decodeModel(bytes: Uint8Array | undefined): MefModel | null {
-  try {
-    return bytes ? decodeMef(bytes) : null;
-  } catch {
-    return null;
-  }
-}

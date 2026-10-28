@@ -1,6 +1,6 @@
 // Built-in zoom overlays (binoculars, sniper scope) drawn from the game's own sprites, plus the flashbang white-out.
-// common/sprites/binoculars.spr is the top-left quarter of the binocular frame and snipersight.spr the top-left
-// quarter of the scope ring; both are mirrored into four. The UI may draw its own and set `drawOverlay = false`.
+// common/sprites/binoculars.spr is the left eyepiece (mirrored for the right one, stretched to full height) and
+// snipersight.spr the top-left quarter of the scope ring (mirrored into four). The UI may draw its own and set `drawOverlay = false`.
 import type { ZoomKind } from "./api.ts";
 import { spriteCanvas, type Sprite } from "./sprite.ts";
 
@@ -14,8 +14,8 @@ export class ZoomOverlay {
 
   constructor(parent: HTMLElement, sprites: Map<string, Sprite>) {
     this.root = el("position:absolute;inset:0;pointer-events:none;display:none");
-    this.binoculars = this.quad(sprites.get("binoculars"), "#000");
-    this.scope = this.quad(sprites.get("snipersight"), "#000");
+    this.binoculars = this.frame(sprites.get("binoculars"), "#000", false);
+    this.scope = this.frame(sprites.get("snipersight"), "#000", true);
     // Thin crosshair over the scope.
     const cross = el("position:absolute;inset:0");
     cross.append(
@@ -36,16 +36,20 @@ export class ZoomOverlay {
     parent.append(this.root, this.white);
   }
 
-  /** A full-screen frame made of one sprite quarter mirrored four ways, or a CSS vignette when it is missing. */
-  private quad(sprite: Sprite | undefined, fill: string): HTMLDivElement {
+  /**
+   * A full-screen frame from one sprite mirrored left/right (and top/bottom when `quarters`), or a CSS vignette
+   * when the sprite is missing.
+   */
+  private frame(sprite: Sprite | undefined, fill: string, quarters: boolean): HTMLDivElement {
     const box = el("position:absolute;inset:0;display:none");
     if (!sprite) {
       box.style.background = `radial-gradient(ellipse 42% 42% at 50% 50%, transparent 96%, ${fill} 100%)`;
       return box;
     }
     // Keep the frame square-ish in the middle and fill the sides with black.
-    const frame = el("position:absolute;top:0;bottom:0;left:50%;aspect-ratio:4/3;height:100%;transform:translateX(-50%);display:grid;grid-template:1fr 1fr/1fr 1fr");
-    for (const [fx, fy] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+    const frame = el(`position:absolute;top:0;bottom:0;left:50%;aspect-ratio:4/3;height:100%;transform:translateX(-50%);display:grid;grid-template:${quarters ? "1fr 1fr" : "1fr"}/1fr 1fr`);
+    const cells = quarters ? ([[false, false], [true, false], [false, true], [true, true]] as const) : ([[false, false], [true, false]] as const);
+    for (const [fx, fy] of cells) {
       const c = spriteCanvas(sprite, fx, fy);
       c.style.cssText = "width:100%;height:100%;display:block;image-rendering:auto";
       frame.append(c);

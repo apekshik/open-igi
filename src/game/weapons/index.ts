@@ -54,6 +54,8 @@ const RELOAD_PARTS: Record<string, number> = {
   glock_reload: 3, colt_reload: 7, mp5_reload: 5, uzi_reload: 3, uzix2_reload: 1, m16_reload: 3, ak47_reload: 3,
   spas12_reload: 2, spas12_bulins: 4, jackh_reload: 4, dragu_reload: 2, minimi_reload: 2,
 };
+/** Spread multiplier by what Jones's legs are doing (not in the data; IGI rewards standing still and crouching). */
+const GAIT_SPREAD: Record<string, number> = { idle: 1, crouch: 1.2, crawl: 1.2, walk: 1.6, run: 2.5, air: 3, ladder: 3 };
 const SLOT_KEYS: Action[] = ["weapon1", "weapon2", "weapon3", "weapon4", "weapon5", "weapon6", "weapon7", "weapon8", "weapon9"];
 const FIREARMS = new Set(["GUN", "PISTOL", "SHOTGUN"]);
 const THROWN = new Set(["GRENADE", "PROXIMITYMINE"]);
@@ -115,7 +117,6 @@ class Arsenal implements WeaponsService {
   private baseFov = 70;
   private baseSensitivity = 0;
   private lastZoomSound = 0;
-  private lastFeet: Vec3 | null = null;
   private moving = false;
 
   // Everyone else.
@@ -317,7 +318,7 @@ class Arsenal implements WeaponsService {
   private shoot(ownerId: number, spec: WeaponSpec, origin: Vec3, dir: Vec3, options: FireOptions, player: boolean): ShotResult {
     const physics = this.game.services.physics;
     const pellets = Math.max(1, spec.bulletsPerRound);
-    const amplitude = deg(Math.max(Math.abs(spec.spread[0]), Math.abs(spec.spread[1])) * SPREAD_UNIT + (options.spread ?? 0));
+    const amplitude = deg(Math.max(Math.abs(spec.spread[0]), Math.abs(spec.spread[1])) * SPREAD_UNIT * (options.spreadScale ?? 1) + (options.spread ?? 0));
     const range = Math.max(spec.range, 1) * METRE;
     const result: ShotResult = { hits: [] };
     const damage = new Map<number, { amount: number; zone: number; point: Vec3; part?: string }>();
@@ -370,33 +371,23 @@ class Arsenal implements WeaponsService {
     return { hits: [{ point: hit.point, entityId: hit.entityId, part: hit.part }] };
   }
 
-  /** Hit-zone multiplier: AI from IGI.exe's table, the player from humanplayer.qvm (args 9-25). */
+  /**
+   * Hit-zone multiplier applied here: AI zones from IGI.exe's table. The player applies its own humanplayer.qvm zones
+   * to the incoming amount (src/game/player), so hits on the player go out as the bare Damage Factor.
+   */
   private zone(target: Entity, part?: string): number {
-    if (target.id !== this.playerId) return AI_ZONES[part ?? "torso"] ?? 1;
-    const g = this.data.player.general;
-    const z = (i: number, fallback: number) => g[9 + i] ?? fallback;
-    if (part === "head") return z(15, 1);
-    if (part === "legs" || part === "arms") return z(1, 0.75);
-    return z(12, 1);
+    if (target.id === this.playerId) return 1;
+    return AI_ZONES[part ?? "torso"] ?? 1;
   }
 
-  /** Damage in IGI units (fraction of the death threshold) → health. */
-  private applyFactor(targetId: number, factor: number, sourceId: number | null, point: Vec3, dir: Vec3, part?: string) {
-    const target = this.game.entities.get(targetId);
-    if (!target) return;
-    const threshold = target.id === this.playerId ? (this.data.player.general[7] ?? 3) : 1;
-    this.applyDamage(targetId, (factor / threshold) * target.maxHealth, sourceId, point, dir, part);
+  private applyFactor(targetId: number, amount: number, sourceId: number | null, point: Vec3, dir: Vec3, part?: string) {
+    this.applyDamage(targetId, amount, sourceId, point, dir, part);
   }
 
   applyDamage(targetId: number, amount: number, sourceId: number | null, point: Vec3, direction: Vec3, part?: string) {
     const target = this.game.entities.get(targetId);
     if (!target || !target.alive || amount <= 0) return;
-    target.health = Math.max(0, target.health - amount);
     this.game.events.emit("damage", { targetId, amount, sourceId, point, direction, part });
-    if (target.health <= 0) {
-      target.alive = false;
-      this.game.events.emit("death", { entityId: targetId, killerId: sourceId });
-    }
   }
 
   explode(position: Vec3, sourceId: number | null, radius: number, falloff: number, damage: number, kind = "explosion") {
@@ -718,7 +709,8 @@ class Arsenal implements WeaponsService {
     this.binoculars = on;
     if (on && bin) {
       const x = extras(this.data, bin.spec);
-      this.setZoom("binoculars", x.defaultFov ?? 70);
+      // The data's default (70) and max (90) are wider than IGI's 46.8° view, so start at 3x and keep zooming in.
+      this.setZoom("binoculars", Math.min(x.defaultFov ?? 70, this.zoomBase() / 3));
       this.sound("bin_zoom_1");
     } else {
       this.setZoom(null);
@@ -733,7 +725,7 @@ class Arsenal implements WeaponsService {
     const input = this.game.input;
     if (!player) return;
     if (!this.zoomKind && kind) {
-      this.baseFov = player.fov;
+      this.baseFov = player.defaultFov ?? player.fov;
       this.baseSensitivity = input.sensitivity;
     }
     if (!kind && !this.zoomKind) return;
@@ -745,6 +737,10 @@ class Arsenal implements WeaponsService {
     if (this.drawOverlay && kind) this.overlay.show(kind, this.zoomFov, this.baseFov);
     else this.overlay.hide();
     this.game.events.emit("weapon:zoom", { ownerId: this.playerId, kind, fov: this.zoomFov, weapon: this.binoculars ? "WEAPON_ID_BINOCULARS" : (this.held ?? "") });
+  }
+
+  private zoomBase(): number {
+    return this.zoomKind ? this.baseFov : (this.game.services.player?.defaultFov ?? 46.8);
   }
 
   /** Zoom in (factor < 1) or out within the current zoom's limits. */
@@ -764,7 +760,7 @@ class Arsenal implements WeaponsService {
     if (this.zoomKind === "binoculars") {
       const bin = [...this.carried.values()].find((c) => c.spec.type === "BINOCULAR");
       const x = bin ? extras(this.data, bin.spec) : {};
-      return [x.minFov ?? 5, x.maxFov ?? 90];
+      return [x.minFov ?? 5, Math.min(x.maxFov ?? 90, this.zoomBase())];
     }
     const spec = this.held ? this.spec(this.held) : undefined;
     const min = spec ? (extras(this.data, spec).zoomMinFov ?? 30) : 30;
@@ -798,10 +794,10 @@ class Arsenal implements WeaponsService {
 
     if (spec.type === "MEDIPACK") {
       const e = player.entity;
-      if (c.clip <= 0 || e.health >= e.maxHealth) return;
+      if (c.clip <= 0 || e.health >= e.maxHealth || player.dead) return;
       c.clip--;
       const heal = (extras(this.data, spec).healPerRound ?? 0.01) * e.maxHealth;
-      e.health = Math.min(e.maxHealth, e.health + heal);
+      player.heal(heal);
       if (this.burst === 1) {
         this.sound("syringe");
         vm?.play(fireAnim, { loop: false });
@@ -852,7 +848,7 @@ class Arsenal implements WeaponsService {
       this.launch(this.playerId, spec, vec3.add(eye, vec3.scale(look, 0.8 * METRE)), look);
     } else {
       this.shotSound(this.playerId, spec, eye);
-      this.shoot(this.playerId, spec, eye, look, {}, true);
+      this.shoot(this.playerId, spec, eye, look, { spreadScale: GAIT_SPREAD[player.gait] ?? 1 }, true);
     }
     // View kick (degrees about X = pitch up, about Z = yaw), fixed plus random.
     player.pitch = Math.min(1.5, player.pitch + deg(spec.kick.fixedX + rand(-1, 1) * spec.kick.randomX));
@@ -892,7 +888,7 @@ class Arsenal implements WeaponsService {
       t.fn();
     }
     const player = game.services.player;
-    if (player && !player.frozen && player.entity.alive) this.handleInput(game);
+    if (player && !player.frozen && !player.dead) this.handleInput(game);
     else this.triggerUp = true;
 
     // Sound loops of shooters that stopped firing.
@@ -900,21 +896,14 @@ class Arsenal implements WeaponsService {
     if (player && !game.input.isDown("fire") && this.shooters.has(this.playerId)) this.stopLoop(this.playerId);
 
     // Walking over pickups.
-    if (player?.entity.alive) for (const e of this.pickups.near(player.entity.position)) this.collect(e);
+    if (player && !player.dead) for (const e of this.pickups.near(player.entity.position)) this.collect(e);
 
     this.projectiles.update(dt);
     this.pickups.update(dt);
     this.effects.update(dt);
     this.overlay.update(dt);
 
-    if (player) {
-      const feet = player.entity.position;
-      if (this.lastFeet && dt > 0) {
-        const speed = Math.hypot(feet[0] - this.lastFeet[0], feet[1] - this.lastFeet[1]) / dt;
-        this.moving = speed > 0.8 * METRE;
-      }
-      this.lastFeet = [...feet] as Vec3;
-    }
+    this.moving = !!player && ["walk", "run", "crouch", "crawl"].includes(player.gait) && Math.hypot(player.velocity[0], player.velocity[1]) > 0.5 * METRE;
   }
 
   private handleInput(game: Game) {
@@ -975,6 +964,8 @@ class Arsenal implements WeaponsService {
     game.camera.updateMatrixWorld();
     const look = game.input.look();
     vm.update(dt, game.camera, { moving: this.moving, lookYaw: look.yaw, lookPitch: look.pitch });
+    const player = game.services.player;
+    if (player && (player.thirdPerson || player.dead)) vm.root.visible = false;
   }
 }
 

@@ -21,6 +21,8 @@ export interface FireOptions {
   damageScale?: number;
   /** Extra random spread in degrees on top of the weapon's own (AI aim error). */
   spread?: number;
+  /** Multiplies the weapon's own spread (movement, stance). Default 1. */
+  spreadScale?: number;
   /** Skip the muzzle flash, tracer and sound (e.g. off-screen shooters). */
   quiet?: boolean;
 }
@@ -61,11 +63,15 @@ export interface WeaponsService {
    */
   fire(ownerId: number, weaponId: string, origin: Vec3, direction: Vec3, options?: FireOptions): ShotResult;
   /**
-   * Apply damage to an entity: lowers its health, emits "damage" and, when health reaches 0, "death".
-   * The weapons system is the single place health goes down; owners react to the events and must not subtract again.
+   * Send damage to an entity as a "damage" event in IGI damage units (Damage Factor x hit-zone multiplier; AI die at
+   * 1.0, the player at humanplayer.qvm's 3.0). The entity's owner subtracts health and emits "death". Hits on the
+   * player carry the bare Damage Factor and the hit part, since the player applies its own zone table.
    */
   applyDamage(targetId: number, amount: number, sourceId: number | null, point: Vec3, direction: Vec3, part?: string): void;
-  /** An explosion with IGI's radius/falloff damage, effects, sound and noise. */
+  /**
+   * An explosion: full `damage` (IGI units) within radius - falloff, fading to 0 at `radius` (world units), behind
+   * cover none; effects, sound, "explosion" and "noise" events.
+   */
   explode(position: Vec3, sourceId: number | null, radius: number, falloff: number, damage: number, kind?: string): void;
 }
 
