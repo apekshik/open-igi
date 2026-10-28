@@ -80,3 +80,19 @@ Read for research only; no code from it is used. Its exe analysis (`docs/gamepla
 `DefineHumanPlayerGeneral` arguments, the movement state/clip table, root-motion speeds, jump and fall-damage rules,
 lean timing, footstep-noise ranges and eye offsets that `src/game/player/` reimplements in our own terms. See
 `docs/formats/player.md`.
+
+### Fonts and menus (flawme/igi-reverse-engineering)
+
+The same project's menu notes (`reverse/docs/10-menus`: the `FONT` chunk order, `TRAN` as a Latin-1 → glyph table,
+the 40-byte `ANMF` glyph record with its UV, width, height and advance offsets, and `FNTH` fields) are the basis of
+`src/formats/font.ts`; see `docs/formats/ui.md`.
+
+## Physics and collision (hjcminus/Project-IGI-Terrain, flawme/igi-reverse-engineering)
+
+`src/game/physics/terrain.ts` ports the terrain height query of hjcminus/Project-IGI-Terrain (MIT, above):
+`Terrain::GetZ`/`RecursiveGetZ` in `source/level/terrain.cpp`, i.e. walking to the leaf cube under a point, visiting
+each x/y quadrant's upper cube before its lower one, and taking the plane of the first upward triangle that contains
+the point. flawme/igi-reverse-engineering's `.mef` notes (`reverse/docs/16-verified-formats`, `reverse/tools/mef_deep.py`)
+gave the collision chunk sizes, the `CMSH` descriptor layout (counts on disk, pointers at run time), the `CFCE`
+record and the `MESH` collision totals at `+0x6C`/`+0x70`, which `src/formats/collision.ts` builds on (see
+`docs/formats/collision.md`).
