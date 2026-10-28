@@ -1,5 +1,6 @@
-// Shot effects in the world: bullet holes, dust and blood puffs, tracers, muzzle flashes of other shooters and
-// explosions. Everything lives in Game.world (IGI space, origin-relative) and is pooled.
+// Shot effects in the world: bullet holes, dust puffs, blood sprays (common/sprites blood1, 7 frames), tracers, muzzle
+// flashes of other shooters, ejected shell casings and explosions. Everything lives in Game.world (IGI space,
+// origin-relative) and is pooled.
 import * as THREE from "three";
 import { METRE, type Vec3 } from "../coords.ts";
 import type { Game } from "../game.ts";
@@ -7,6 +8,9 @@ import { spriteTexture, type Sprite } from "./sprite.ts";
 
 const MAX_DECALS = 96;
 const DECAL_SIZE = 0.11 * METRE;
+const MAX_CASINGS = 24;
+const GRAVITY = 9.81 * METRE;
+const MAX_LIGHTS = 4;
 
 interface Particle {
   sprite: THREE.Sprite;
@@ -15,6 +19,16 @@ interface Particle {
   velocity: Vec3;
   grow: number;
   fade: number;
+  /** Flip-book frames played once over the particle's life. */
+  frames?: THREE.Texture[];
+}
+
+interface Casing {
+  object: THREE.Object3D;
+  velocity: Vec3;
+  spin: THREE.Vector3;
+  age: number;
+  resting: boolean;
 }
 
 export class Effects {
@@ -27,6 +41,9 @@ export class Effects {
   private lights: { light: THREE.PointLight; life: number }[] = [];
   private smoke: THREE.Texture | null;
   private fire: THREE.Texture | null;
+  private bloodFrames: THREE.Texture[];
+  private casings: Casing[] = [];
+  private nextCasing = 0;
   private decalMaterial: THREE.MeshBasicMaterial;
   private bloodDecal: THREE.MeshBasicMaterial;
 
@@ -37,6 +54,15 @@ export class Effects {
     const f = sprites.get("fireball");
     this.smoke = s ? spriteTexture(s) : null;
     this.fire = f ? spriteTexture(f) : null;
+    const b = sprites.get("blood1");
+    this.bloodFrames = b ? (b.frames ?? [b.rgba]).map((rgba) => spriteTexture({ ...b, rgba })) : [];
+    // Create the flash lights up front: adding a light later recompiles every lit material (a visible hitch on the
+    // first shot).
+    for (let i = 0; i < MAX_LIGHTS; i++) {
+      const light = new THREE.PointLight(0xffc070, 0, 5 * METRE, 0);
+      this.group.add(light);
+      this.lights.push({ light, life: 0 });
+    }
     this.decalMaterial = new THREE.MeshBasicMaterial({ map: holeTexture(), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 });
     this.bloodDecal = new THREE.MeshBasicMaterial({ map: holeTexture("#5a0000"), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 });
   }
@@ -49,7 +75,11 @@ export class Effects {
     if (!flesh) this.decal(point, n, this.decalMaterial, DECAL_SIZE * (0.7 + Math.random() * 0.6));
     const color = flesh ? 0x8a1010 : 0xb0a590;
     const out: Vec3 = [n.x, n.y, n.z];
-    for (let i = 0; i < (flesh ? 3 : 2); i++) {
+    if (flesh && this.bloodFrames.length) {
+      this.puff(point, [out[0] * 0.3, out[1] * 0.3, out[2] * 0.3 + 0.2], this.bloodFrames[0], 0xffffff, 0.35 * METRE, 0.5 * METRE, 0.35, 1);
+      this.particles[this.particles.length - 1].frames = this.bloodFrames;
+    }
+    for (let i = 0; i < 2; i++) {
       const v: Vec3 = [
         out[0] * 0.6 + (Math.random() - 0.5) * 0.5,
         out[1] * 0.6 + (Math.random() - 0.5) * 0.5,
@@ -103,16 +133,7 @@ export class Effects {
   /** A flash of light at a muzzle or explosion. */
   light(at: Vec3, color: number, intensity: number, distance: number, life: number) {
     // Reuse lights: adding and removing lights recompiles materials in three.js.
-    let slot = this.lights.find((l) => l.life <= 0);
-    if (!slot) {
-      if (this.lights.length >= 4) slot = this.lights.reduce((a, b) => (a.life < b.life ? a : b));
-      else {
-        const light = new THREE.PointLight(color, 0, distance, 0);
-        this.group.add(light);
-        slot = { light, life: 0 };
-        this.lights.push(slot);
-      }
-    }
+    const slot = this.lights.find((l) => l.life <= 0) ?? this.lights.reduce((a, b) => (a.life < b.life ? a : b));
     slot.light.color.setHex(color);
     slot.light.intensity = intensity;
     slot.light.distance = distance;
@@ -149,6 +170,61 @@ export class Effects {
     this.decal([at[0], at[1], at[2] + 0.05 * METRE], down, this.decalMaterial, radius * 0.35);
   }
 
+  /**
+   * A spent casing flung from the ejection port (`at`, IGI space) to the right of `forward`. `model` is the weapon's
+   * Casing Model (113_01_1 ...); casings tumble, drop to the ground, bounce once and vanish after a few seconds.
+   */
+  casing(at: Vec3, forward: Vec3, model: THREE.Object3D | null) {
+    if (!model) return;
+    let c = this.casings[this.nextCasing];
+    if (c) this.group.remove(c.object);
+    const right: Vec3 = [forward[1], -forward[0], 0];
+    const len = Math.hypot(right[0], right[1]) || 1;
+    const side = (1.2 + Math.random() * 0.8) * METRE / len;
+    c = {
+      object: model,
+      velocity: [right[0] * side - forward[0] * 0.3 * METRE, right[1] * side - forward[1] * 0.3 * METRE, (1.2 + Math.random() * 0.8) * METRE],
+      spin: new THREE.Vector3(Math.random() * 20 - 10, Math.random() * 20 - 10, Math.random() * 20 - 10),
+      age: 0,
+      resting: false,
+    };
+    model.position.copy(this.game.local(at));
+    this.group.add(model);
+    this.casings[this.nextCasing] = c;
+    this.nextCasing = (this.nextCasing + 1) % MAX_CASINGS;
+  }
+
+  private updateCasings(dt: number) {
+    const physics = this.game.services.physics;
+    for (let i = 0; i < this.casings.length; i++) {
+      const c = this.casings[i];
+      if (!c?.object.parent) continue;
+      c.age += dt;
+      if (c.age > 4) {
+        this.group.remove(c.object);
+        continue;
+      }
+      if (c.resting) continue;
+      c.velocity[2] -= GRAVITY * dt;
+      const p = c.object.position;
+      p.x += c.velocity[0] * dt;
+      p.y += c.velocity[1] * dt;
+      p.z += c.velocity[2] * dt;
+      c.object.rotation.x += c.spin.x * dt;
+      c.object.rotation.y += c.spin.y * dt;
+      c.object.rotation.z += c.spin.z * dt;
+      if (c.velocity[2] > 0 || !physics) continue;
+      const world: Vec3 = [p.x + this.game.origin[0], p.y + this.game.origin[1], p.z + this.game.origin[2]];
+      const ground = physics.groundHeight(world[0], world[1], world[2] + 0.2 * METRE);
+      if (ground === null || world[2] > ground) continue;
+      p.z = ground - this.game.origin[2] + 0.01 * METRE;
+      if (Math.abs(c.velocity[2]) > 1 * METRE) {
+        c.velocity = [c.velocity[0] * 0.4, c.velocity[1] * 0.4, -c.velocity[2] * 0.3];
+        c.spin.multiplyScalar(0.5);
+      } else c.resting = true;
+    }
+  }
+
   /** Blood on the ground under a hit character. */
   blood(point: Vec3, ground: number | null) {
     if (ground === null || point[2] - ground > 2 * METRE) return;
@@ -171,8 +247,12 @@ export class Effects {
       p.sprite.position.z += p.velocity[2] * dt;
       p.velocity = [p.velocity[0] * (1 - dt * 2), p.velocity[1] * (1 - dt * 2), p.velocity[2] * (1 - dt * 2)];
       p.sprite.scale.setScalar(p.sprite.scale.x + p.grow * dt);
-      p.sprite.material.opacity = p.fade * (1 - f);
+      if (p.frames) {
+        p.sprite.material.map = p.frames[Math.min(p.frames.length - 1, Math.floor(f * p.frames.length))];
+        p.sprite.material.opacity = p.fade * Math.min(1, (1 - f) * 3);
+      } else p.sprite.material.opacity = p.fade * (1 - f);
     }
+    this.updateCasings(dt);
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const t = this.tracers[i];
       t.life -= dt;
