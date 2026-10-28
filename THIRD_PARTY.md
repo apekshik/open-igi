@@ -61,3 +61,22 @@ source-available).
 Read for research only; no code from it is used. Its notes on type 1 models (`docs/mef_model_types.md`: the skin
 fields and that `XTRV` holds render plus skinning-only vertices) pointed us at the extra influence records, and its bone
 names for the 33-bone rigs agree with the bone order documented in `docs/FORMATS.md`.
+
+## fflate
+
+[fflate](https://github.com/101arrowz/fflate) (MIT) inflates entries when importing a game zip.
+
+## flawme/igi-reverse-engineering: player rules
+
+The same project's notes on the damage handler and hit zones (`reverse/docs/06-weapons`: player max damage from
+`DefineHumanPlayerGeneral` argument 7, the 17-zone multiplier table, the player-only difficulty factor) and on world
+scale and gravity (`reverse/docs/13-implementation`) underlie the player controller in `src/game/player/`.
+
+## Haseebraza12/reimagine-igi
+
+<https://github.com/Haseebraza12/reimagine-igi>, no license stated.
+
+Read for research only; no code from it is used. Its exe analysis (`docs/gameplay.md`) gave the meaning of the
+`DefineHumanPlayerGeneral` arguments, the movement state/clip table, root-motion speeds, jump and fall-damage rules,
+lean timing, footstep-noise ranges and eye offsets that `src/game/player/` reimplements in our own terms. See
+`docs/formats/player.md`.
