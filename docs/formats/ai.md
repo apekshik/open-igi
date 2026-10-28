@@ -68,12 +68,90 @@ death clip (`SetDeathAnimation(85)`), a stationary gun to man (`SetGunnerID`) an
 
 ## common/ai/settings.qvm
 
-`HumanAIConfigItem` tasks, one per AI type and difficulty (`GD_1`..`GD_3`; we use `GD_2` unless `?difficulty=N`), with
+`HumanAIConfigItem` tasks, one per AI type and difficulty (`GD_1` easy, `GD_2` normal = config.qvm's shipped `GOGameDiff`,
+`GD_3` hard; `AiService.difficulty`, starting from `?difficulty=1..3|easy|normal|hard`), with
 32 named values: damage scale, recoil threshold, combat initial/repeat movement delay, targeting timeout (s), tracking
 distance (m), lie-down minimum distance (m), evasive action and roll/lie-down probabilities, hit probability at minimum
 and maximum range, max rounds per burst, aim precision, minimum/random clip fraction per burst, minimum/random delay
 between bursts and between shots, grenade probabilities, distances and timings, close-combat hit probability and
-damage. `src/game/ai/level.ts` lists them in order.
+damage. `src/game/ai/level.ts` lists them in order. The difficulty picks the row and nothing else that we know of
+(flawme's 15-configuration confirms the three constants but not their effect). Normal (GD_2) for the common types:
+
+| type | damage scale | hit near / far | aim precision | rounds per burst | burst delay s | grenade p |
+|---|---|---|---|---|---|---|
+| PATROL_AK | 0.5 | 1 / 0.3 | 0.8 | 6-15 of 30 | 0.5-1 | 0.33 |
+| GUARD_AK | 0.5 | 1 / 0.3 | 0.6 | 24-30 of 30 | 0.5-1 | 0.33 |
+| SPETNAZ_*_AK | 1 | 1 / 0.7 | 0.7 | 3-12 of 30 | 0.5-1 | 0.33 |
+| SNIPER | 0.5 | 1 / 0.5 | 0.6 | 1-3 of 10 | 1.5-2 | 0.33 |
+| GUNNER | 0.5 | 1 / 0.3 | 0.6 | 50 | 1-2 | 0.33 |
+
+How we use them (`soldier.ts`, `CombatAction`):
+
+- **Hit chance per round** = lerp(hit near, hit far, d / view range) x (precision + (1 - precision) x max(0, 1 - d / 10 m))
+  x settle (0.4 rising to 1 over 3 s of continuous sight) x target (crouched 0.75, prone 0.5; walking 0.75, running
+  0.55). The data gives the two probabilities and the precision; how IGI.exe combines them is our reading. A hit is
+  aimed at the chest (15 % head, or the head when the chest is behind cover), a miss 0.5-1.5 m beside the target.
+- **Reaction** before the first burst = the burst delay; bursts = clip x (min + random clip fraction), capped by max
+  rounds; shots paced by max(weapon rate, min + random shot delay).
+- **Damage scale** multiplies the weapon's Damage Factor (AK47 0.3 -> 0.15 per hit at GD_2; Jones dies at 3.0).
+  Shotguns: we read the Spas 12's 0.25 as the whole shell's damage, shared by its 30 pellets (read per pellet, one
+  guard shell did up to 7.5 at 10 m; the weapons system still applies it per pellet to the player's own shots).
+- **Recoil threshold**: a hit at least this strong stops the soldier's burst for 0.5-0.8 s.
+- **Grenades**: soldiers carrying WEAPON_ID_GRENADE/FLASHBANG (one per Gun task; 51 and 23 in the 14 levels) roll the
+  grenade probability before a burst (and the "when reload" one once per reload) while the target is within the
+  min/max distance, with a 4 s cooldown. Clip 70 is the throw (hand swings up to 1.6 m and forward), released at 55 %.
+  Flight time = min + random fly time, stretched so the horizontal speed stays under 16 m/s; fuse = flight + min +
+  random explode time.
+- **Close combat** within 1.4 m: rifle butt, close-combat hit probability and damage, every 1.2 s.
+- **Styles**, from IGI.exe's combat state names ("Combat - Kneel/Liedown/RePosition/Follow/LookForTarget", "Guard
+  Combat - Stand", "RPG Combat - Stand/Kneel", "Gunner Combat - Stand"): patrol types move (follow 10 m at a time
+  beyond the tracking distance, evasive rolls, crouch, lie down beyond the lie-down distance, reposition to a node with
+  a clear line of fire), firing a burst between moves; guard types and snipers hold their post; RPG soldiers (no
+  retail level places one) stand or kneel and fire LAW rockets at the target's feet; gunners man a stationary gun.
+
+## AIACTIONFLAG_PUSHABLE
+
+Scripts pass it to AIAction_Combat, AIAction_Activate, AIAction_Patrol (level 4's Priboi escort path) and others. We
+read it as "a later event may push this action down": the new actions run on top and the pushed one resumes when they
+end (its walk is re-planned). Actions queued without it are replaced. So Priboi runs from gunfire for 15 s and then
+carries on along his path, and soldiers go back to a pushable patrol after a fight. Unarmed characters that are not
+civilians take cover (crouch 4-6 s) instead of fighting.
+
+## Stationary guns (StationaryGun tasks)
+
+Position, Orientation (3 angles, the third the heading), Holder model (123_02_1), Weapon ID (WEAPON_ID_M2HB), Max up
+angle, Max down angle, Max sideways angle (degrees), Ammo (-1 = unlimited). Level 8 has six, manned by AITYPE_GUNNER
+soldiers through `AIFunction_SetGunnerID`. The position sits on top of a post or sandbag wall about 1.3 m above the
+floor; we draw the holder there and the gun (123_01_1, barrel along +Y, 1.24 m) on top, traverse it within the limits
+at 1.6 rad/s and stand the gunner 0.95 m behind it on the floor. gunner.qvm answers COMBAT and ALARMON with
+`AIAction_Activate(gunner id)` while `AIFunction_GetGunnerStatus()` is false; arriving mounts the gun, after which
+combat fires the gun's weapon (M2HB: Damage Factor 1, so 0.5 per hit at GD_2). Walking away dismounts.
+`AIStationaryGunHolder` (level 14's automatic sentry guns) is not done.
+
+## Doors, ladders, lighting
+
+Graph nodes carry `NODECRITERIA_DOOR` but doors are separate Door tasks (most with task id -1). A walking soldier
+casts a ray 1.5 m along its route every 0.25 s; when it meets a door entity that the mission system reports closed and
+unlocked (`MissionService.door/openDoor`) it opens it and waits up to 2 s for it to swing open; locked doors stay shut.
+A door the player works within 10 m of a soldier is AIEVENT_DOOR (range chosen). No AI graph has ladder nodes (the
+criteria are only DOOR, STAIR and VIEW) and no script does more with ladders than hear AIEVENT_LADDER, so soldiers do
+not climb ladders. Nothing in the scripts, settings or IGI.exe's AI strings refers to light, so detection ignores it.
+
+## Containers, cutscenes and passengers
+
+A character that entered play because its ConditionalContainers run is removed (AIEVENT_DELETE first; body, entity
+and gun go) when one of them stops, and spawns afresh if it runs again. Cutscene and vehicle characters are spawned
+only through `AiService.spawn(taskId, { passenger: { anchor } })`: passive (no senses, no fighting) and carried by the
+anchor every frame. No system exposes Heli, Car or Train transforms yet, so nothing calls it.
+
+## Friendly fire
+
+Nothing in the data says whether soldiers' bullets hurt their own side. In play-testing they killed each other in
+crossfire within seconds, so before every round a soldier checks for a living comrade within 1 m of the line to the
+aim point (or 3 m beyond it) and holds the burst (patrols then reposition), and soldiers' bullets do not damage their
+own team; grenades, rockets and other explosions still do. Before each burst (and every 5 rounds) the line of fire
+from the muzzle is checked too: sight passes glass and chain-link fences but bullets stop there, so a soldier whose
+shot would hit a wall, fence, glass or door holds fire instead of emptying clips into it.
 
 ## Soldier clips (common/anims/001.iff)
 
@@ -119,10 +197,16 @@ works between arbitrary positions; walking goes through `physics.move` so floors
 
 ## Choices where the data is silent
 
-- Detection is gradual: seconds to notice = (0.4 + 2.6 (d / range)^1.5), x1.8 crouched, x3 prone, x0.6 running, x1.3
-  still, x0.3 within 4 m, faster while the alarm is on; peripheral vision to 110 degrees within 8 m at 30 % rate.
-  Lighting is not modelled.
-- Gunshot hearing 80 m (silenced 8 m); a bullet passing within 2 m is a near miss (`AIEVENT_GUNSHOTMISS`).
-- Hit chance = lerp(near, far, d / (1.25 x alarm view length)) x a settle factor that grows from 0.35 to 1 over 3 s of
-  continuous sight, x0.8 against a crouched target, x0.6 prone. Misses are aimed 0.5-1.5 m beside the target.
-- A soldier entering combat alerts (`AIEVENT_ALERT`) comrades within 15 m, or 35 m with line of sight.
+- Hearing (data): each weapon's "AI Detection Event Range" names `HUMANAI_DETECTIONEVENT_GUNSHOT_RANGE` or
+  `HUMANAI_DETECTIONEVENT_GUNSHOT_SILENCED_RANGE`; IGI.exe registers them for the scripts as 0x1E000 and 0x1000 world
+  units, i.e. 30 m and 1 m (the MP5SD, knife and thrown grenades use the silenced range). Comrades' shots are heard
+  too, which is how a fight draws the guards around it.
+- Sight (data): 40 m, 50 m while the alarm is on or fighting, half-angle 45 degrees, vertical 50 (snipers 100 m and
+  15 degrees), from the type scripts.
+- Detection time (chosen; nothing in the data): seconds to notice = (0.4 + 2.6 (d / range)^1.5), x1.8 crouched, x3
+  prone, x0.6 running, x1.3 still, x0.3 within 4 m, /1.5 while the alarm is on; peripheral vision to 110 degrees within
+  8 m at 30 % rate. Measured on level 1 standing still in view: about 0.4 s at 10 m, 0.6 s at 20 m, 0.7-1 s at 30 m;
+  crouched at 20 m about 1.1 s.
+- A bullet passing within 2 m is a near miss (`AIEVENT_GUNSHOTMISS`).
+- A soldier entering combat alerts (`AIEVENT_ALERT`) comrades within 15 m, or 35 m with line of sight, once per wave;
+  `AIFunction_SendResponse` answers the alerting comrade with `AIEVENT_ALERT_RESPONSE`.

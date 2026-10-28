@@ -82,6 +82,8 @@ class AiSystem implements AiService, AiWorld {
   frameTime = 0;
   /** The latest explosion (its damage events follow it in the same frame). */
   private blast: { sourceId: number | null; time: number } | null = null;
+  /** Characters spawned because their ConditionalContainers run (they are removed when one stops). */
+  private gated = new Set<Soldier>();
   private unsubscribe: (() => void)[] = [];
   private markers = new Map<Soldier, THREE.Mesh>();
   private pending: CharacterSpec[] = [];
@@ -291,6 +293,7 @@ class AiSystem implements AiService, AiWorld {
     s.object?.removeFromParent();
     this.game.entities.remove(s.id);
     this.soldiers.splice(this.soldiers.indexOf(s), 1);
+    this.gated.delete(s);
     const m = this.markers.get(s);
     m?.removeFromParent();
     this.markers.delete(s);
@@ -375,7 +378,10 @@ class AiSystem implements AiService, AiWorld {
     if (weapons) {
       // Aim error is already in the direction; distant off-screen shooters skip their muzzle effects.
       const quiet = !this.inView(s.position) && dist(s.position, game.fromScene(game.camera.position)) > 60 * METRE;
-      weapons.fire(s.id, w.id, origin, dir, { damageScale: s.config.damageScale, spreadScale: w.pellets > 1 ? 1 : 0.5, quiet });
+      // Shotguns (Spas 12: Damage Factor 0.25, 30 pellets): we read the factor as the whole shell's, shared by its
+      // pellets. Read per pellet, one shell from a guard did up to 7.5 damage (Jones dies at 3); see docs/formats/ai.md.
+      const pellets = Math.max(1, w.pellets);
+      weapons.fire(s.id, w.id, origin, dir, { damageScale: s.config.damageScale / pellets, spreadScale: pellets > 1 ? 1 : 0.5, quiet });
       return;
     }
     // Our own hitscan: first thing along the line within 300 m.
@@ -386,7 +392,7 @@ class AiSystem implements AiService, AiWorld {
     game.events.emit("noise", { position: origin, radius: w.silenced ? SILENCED_RANGE : GUNSHOT_RANGE, sourceId: s.id, kind: "gunshot" });
     if (w.fireSound && Math.random() < 0.5) this.sound(w.fireSound, origin, 0.8);
     if (hit?.entityId !== null && hit?.entityId !== undefined) {
-      const amount = w.damage * s.config.damageScale * w.pellets;
+      const amount = w.damage * s.config.damageScale;
       game.events.emit("damage", { targetId: hit.entityId, amount, sourceId: s.id, point: hit.point, direction: dir, part: hit.part });
     }
   }
@@ -418,13 +424,14 @@ class AiSystem implements AiService, AiWorld {
       }
     };
     for (const s of [...this.soldiers]) {
-      if (!s.spec.gates.length || gatesOpen(s.spec, test)) continue;
+      // Only characters that entered play with their containers running leave with them (not ones spawned by request).
+      if (!this.gated.has(s) || gatesOpen(s.spec, test)) continue;
       this.remove(s);
       if (!s.spec.generator && !this.pending.includes(s.spec)) this.pending.push(s.spec);
     }
     this.pending = this.pending.filter((spec) => {
       if (!gatesOpen(spec, test)) return true;
-      this.add(spec);
+      this.gated.add(this.add(spec));
       return false;
     });
     for (const g of this.generators) {
@@ -433,6 +440,7 @@ class AiSystem implements AiService, AiWorld {
       // One guard at a time: the next comes when the last is down or a few seconds have passed.
       if (g.copies.some((c) => c.alive) && this.game.time - g.last < 8) continue;
       const copy = this.add({ ...g.spec, taskId: g.spawned === 0 ? g.spec.taskId : -1 });
+      if (g.spec.gates.length) this.gated.add(copy);
       copy.lastKnown = this.game.services.player ? [...this.game.services.player.entity.position] : null;
       if (this.alarmOn) copy.post("AIEVENT_ALARMON");
       g.copies.push(copy);

@@ -119,6 +119,19 @@ interface Action {
   update(s: Soldier, dt: number): boolean;
   /** Event rank of the event that queued it (set when queued). */
   rank?: number;
+  /**
+   * Queued with AIACTIONFLAG_PUSHABLE: a later event's actions push it down instead of replacing it, and it resumes
+   * when they end (Priboi's escort patrol carries on after he has run from gunfire; a guard's fight after a flashbang).
+   */
+  pushable?: boolean;
+  /** Called when the action continues after a pushed action (re-plan the walk it was on). */
+  resume?(): void;
+}
+
+/** AIACTIONFLAG_PUSHABLE (1) in an action's flag argument. */
+function flagged<T extends Action>(a: T, flag: ScriptValue | undefined): T {
+  a.pushable = typeof flag === "number" && (flag & 1) !== 0;
+  return a;
 }
 
 /** Events that mean the character knows there is an enemy about. */
@@ -266,6 +279,9 @@ export class Soldier implements AiCharacter {
     }
   }
 
+  /** What a pushable action interrupted. */
+  private suspended: { actions: Action[]; rank: number }[] = [];
+
   /** The comrade whose AIEVENT_ALERT is being handled. */
   alertFrom: Soldier | null = null;
   private posting = 0;
@@ -281,6 +297,11 @@ export class Soldier implements AiCharacter {
     this.runScripts(queued);
     if (queued.length) {
       for (const a of queued) a.rank = rank;
+      // Pushable actions under way are pushed down and resume afterwards; anything else is replaced.
+      if (this.actions.length && this.actions[0].pushable && event !== "AIEVENT_DEAD") {
+        this.suspended.push({ actions: this.actions, rank: this.rank });
+        if (this.suspended.length > 3) this.suspended.shift();
+      }
       this.actions = queued;
       this.rank = rank;
       this.route = null;
@@ -367,16 +388,18 @@ export class Soldier implements AiCharacter {
       },
       AIFunction_GetGunnerID: () => this.gunnerId,
       AIFunction_GetGunnerStatus: () => Number(this.manning !== null),
-      AIAction_Patrol: (path, start) => {
+      AIAction_Patrol: (path, start, flag) => {
         const commands = this.spec.patrols.get(n(path));
-        if (commands) queued.push(new PatrolAction(commands, n(start)));
+        if (commands) queued.push(flagged(new PatrolAction(commands, n(start)), flag));
       },
       AIAction_Idle: () => void queued.push(idle(2 + rand() * 2)),
       // Scripted idle animations are not alarm; reactions to shots, explosions and grenades are (HumanAI.isDetection).
-      AIAction_PlayAnimation: (id) => void queued.push(animation(n(id), THREAT.test(this.event) ? "alert" : "idle")),
+      AIAction_PlayAnimation: (id, flag) => void queued.push(flagged(animation(n(id), THREAT.test(this.event) ? "alert" : "idle"), flag)),
       AIAction_SetCombat: () => void (this.pendingCombat = true),
-      AIAction_Combat: () => void queued.push(this.kind === "civilian" ? panic(15) : combat()),
-      AIAction_Activate: (task) => void queued.push(new ActivateAction(n(task))),
+      // Unarmed characters that are not civilians (Priboi, escorts) take cover for a moment instead of fighting.
+      AIAction_Combat: (flag) =>
+        void queued.push(flagged(this.kind === "civilian" ? panic(15) : this.weapon || this.manning || this.gunnerId >= 0 ? combat() : takeCover(4 + rand() * 2), flag)),
+      AIAction_Activate: (task, _run, flag) => void queued.push(flagged(new ActivateAction(n(task)), flag)),
       AIAction_RunPanicking: (seconds) => void queued.push(panic(n(seconds) || 10)),
       AIAction_FallFlat: (seconds) => void queued.push(fallFlat(n(seconds) || 2)),
       AIAction_LookAtEvent: () => void queued.push(lookAtEvent()),
@@ -449,6 +472,13 @@ export class Soldier implements AiCharacter {
     let guard = 4;
     while (guard-- > 0) {
       const a = this.actions[0];
+      if (!a && this.suspended.length) {
+        // The actions that pushed a pushable one aside are over: carry on with it.
+        ({ actions: this.actions, rank: this.rank } = this.suspended.pop()!);
+        this.route = null;
+        this.actions[0]?.resume?.();
+        continue;
+      }
       if (!a) {
         this.rank = Infinity;
         this.post("AIEVENT_IDLE");
@@ -898,6 +928,7 @@ export class Soldier implements AiCharacter {
     this.route = null;
     this.oneShot = null;
     this.actions = [];
+    this.suspended = [];
     this.rank = Infinity;
     this.dismount();
     // Script DEAD handlers only queue AIAction_Dead; we always play the death ourselves.
@@ -1020,6 +1051,31 @@ function fallFlat(seconds: number): Action {
   };
 }
 
+/**
+ * Combat for a character without a gun (Priboi, escorts): crouch where it is, facing away from the threat, for a few
+ * seconds, then carry on (a pushable patrol it interrupted resumes).
+ */
+function takeCover(seconds: number): Action {
+  let t = seconds;
+  let started = false;
+  return {
+    state: "alert",
+    update(s, dt) {
+      if (!started) {
+        started = true;
+        s.stopMoving();
+        if (s.stance === "stand") s.playOnce(CLIP.standToCrouch);
+        s.stance = "crouch";
+      }
+      s.setBase(CLIP.crouch);
+      if ((t -= dt) > 0) return false;
+      s.stance = "stand";
+      s.playOnce(CLIP.crouchToStand);
+      return true;
+    },
+  };
+}
+
 /** AIAction_MoveToEvent: run to where the event happened. */
 function moveToEvent(): Action {
   let started = false;
@@ -1049,6 +1105,9 @@ function toNode(node: number, gait: "walk" | "run"): Action {
         s.goTo(n.position);
       }
       return s.follow(dt, gait);
+    },
+    resume() {
+      started = false;
     },
   };
 }
@@ -1143,6 +1202,11 @@ class PatrolAction implements Action {
   constructor(commands: PatrolCommand[], start: number) {
     this.commands = commands;
     this.i = Math.max(0, start);
+  }
+
+  resume() {
+    this.started = false;
+    this.wait = -1;
   }
 
   update(s: Soldier, dt: number): boolean {
@@ -1285,6 +1349,7 @@ class CombatAction implements Action {
   private firedSinceMove = true;
   /** The last burst was held because the line of fire was blocked. */
   private blocked = false;
+  private burstShots = 0;
   private throwing: { weapon: string; t: number; release: number; thrown: boolean } | null = null;
 
   update(s: Soldier, dt: number): boolean {
@@ -1399,13 +1464,18 @@ class CombatAction implements Action {
       const rounds = Math.round(w.clipSize * (c.minClipFraction + rand() * c.randomClipFraction));
       this.burstLeft = Math.max(1, Math.min(rounds, c.maxRoundsPerBurst || rounds, s.clip));
       this.shotTimer = 0;
-      if (!this.chooseAim(s, target)) {
+      if (!this.chooseAim(s, target, this.muzzle(s, eye))) {
         this.holdFire(style, true);
         return false;
       }
       this.blocked = false;
     }
     if ((this.shotTimer -= dt) > 0) return false;
+    // The target may have ducked behind cover mid-burst: look again every few rounds.
+    if (++this.burstShots % 5 === 0 && !this.chooseAim(s, target, this.muzzle(s, eye))) {
+      this.holdFire(style, true);
+      return false;
+    }
     if (!this.fire(s, target, eye, d, style === "rpg")) {
       this.holdFire(style);
       return false;
@@ -1570,11 +1640,15 @@ class CombatAction implements Action {
     return vec3.add(aim, [side[0] * off, side[1] * off, (rand() - 0.3) * 0.6 * METRE]);
   }
 
-  private fire(s: Soldier, target: Entity, eye: Vec3, d: number, rpg: boolean): boolean {
-    // From the gun's muzzle when the body is posed, else from in front of the chest.
+  /** The gun's muzzle when the body is posed, else a point in front of the chest. */
+  private muzzle(s: Soldier, eye: Vec3): Vec3 {
     const facing = direction(s.yaw);
     const tip = s.posed ? s.body?.muzzle(s.game.toSceneDir(facing)) : null;
-    const muzzle = tip ? s.game.fromScene(tip) : vec3.add(eye, vec3.add(vec3.scale(facing, 0.5 * METRE), [0, 0, -0.25 * METRE]));
+    return tip ? s.game.fromScene(tip) : vec3.add(eye, vec3.add(vec3.scale(facing, 0.5 * METRE), [0, 0, -0.25 * METRE]));
+  }
+
+  private fire(s: Soldier, target: Entity, eye: Vec3, d: number, rpg: boolean): boolean {
+    const muzzle = this.muzzle(s, eye);
     const point = this.aimPoint(s, target, muzzle, d, rpg);
     if (s.comradeInLine(muzzle, point)) return false;
     s.shoot(muzzle, vec3.normalize(vec3.sub(point, muzzle)));
