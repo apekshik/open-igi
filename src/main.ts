@@ -42,7 +42,9 @@ function enter(vfs: Vfs, view: string) {
 
 async function boot() {
   const requested = new URLSearchParams(location.search).get("view");
-  const vfs = (requested === "landing" ? null : await vfsFromDevServer()) ?? (await openStoredVfs().catch(() => null));
+  // The IGI_DATA mount only exists on the Vite dev server.
+  const devVfs = import.meta.env.DEV && requested !== "landing" ? await vfsFromDevServer() : null;
+  const vfs = devVfs ?? (await openStoredVfs().catch(() => null));
   viewSelect.addEventListener("change", () => current && enter(current, viewSelect.value));
   // The game is the default once data is available; the landing screen is the default until then.
   if (vfs && requested !== "landing") return start(vfs, requested ?? "play");
