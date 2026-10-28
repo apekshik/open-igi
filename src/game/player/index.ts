@@ -9,7 +9,8 @@ import { direction, METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Entity } from "../entity.ts";
 import type { Game, GameSystem } from "../game.ts";
 import type { QvmCall, QvmValue } from "../../formats/qvm.ts";
-import { ClipPlayer } from "./animator.ts";
+import { ANIM_TICKS_PER_SECOND, ClipPlayer, rootAt } from "./animator.ts";
+import { findLadders, type Ladder } from "./ladders.ts";
 import type { Gait, PlayerService, Stance } from "./api.ts";
 import { SkinnedBody } from "./body.ts";
 import { DEFAULT_PARAMS, groundMaterial, loadPlayerData, PHYSICS, type PlayerData } from "./params.ts";
@@ -26,11 +27,46 @@ const MOVE_CLIPS = {
   walk: { f: 57, fr: 74, fl: 72, b: 75, br: 77, bl: 76, r: 81, l: 80 },
   crouch: { f: 17, fr: 41, fl: 39, b: 27, br: 49, bl: 47, r: 29, l: 28 },
 };
-const CLIP = { stand: 2, crouched: 19, jump: 25, fall: 2, ladder: 168, death: [201, 202], deathHead: 204 };
-const LADDER_REACH = 1.3 * METRE;
-/** Distance from the feet to the rungs while climbing. */
-const LADDER_HUG = 0.4 * METRE;
+const CLIP = { stand: 2, crouched: 19, jump: 25, fall: 2, ladder: 168, ladderTop: 170, death: [201, 202], deathHead: 204 };
 type Dir = keyof typeof MOVE_CLIPS.run;
+
+// Ladders (see ladders.ts and docs/formats/player.md). Clip 168 is laid out with its origin on the rung plane and on
+// a rung multiple: the planted foot's sole sits 1200 units above it, the pelvis 0.375 m out from the rungs and
+// 0.61 m higher at the end of each 0.7 s cycle (two rungs, one per hand). Clip 170 starts from 168's end pose and
+// climbs over the top: 1.84 m up and 0.77 m forward over 2.33 s, ending stood 2.45 m above its origin.
+/** Grab a ladder from this far out (feet to rungs; a ladder's movement hull stands 0.76 m proud of its rungs). */
+const LADDER_REACH = 1.3 * METRE;
+/** Sideways slack beyond the rails when grabbing. */
+const LADDER_SLACK = 0.3 * METRE;
+/** Height of the planted foot's rung above clip 168's origin, and the top of the hands at the end of a cycle. */
+const LADDER_FOOT_RUNG = 1200;
+const LADDER_HANDS = 9800;
+/** Out from the rungs beyond which a body that left a ladder is clear of the ladder's (and its tower's) hull. */
+const LADDER_CLEAR = 1.2 * METRE;
+/** Seconds over which the body slides from where it stood onto the ladder. */
+const LADDER_GRAB_TIME = 0.25;
+/** Push off when jumping from a ladder (m/s back, up). open-igi's choice. */
+const LADDER_JUMP = { back: 2 * METRE, up: 1 * METRE };
+/** AI hears ladder steps (AIEVENT_LADDER) within this radius. open-igi's choice: IGI's value is not known. */
+const LADDER_NOISE = 10 * METRE;
+const LADDER_SOUNDS = ["walk_ladder_1", "walk_ladder_2", "walk_ladder_3", "walk_ladder_4"];
+
+interface Climb {
+  ladder: Ladder;
+  /** 168 (on the rungs) or 170 (over the top). */
+  clip: number;
+  /** Clip time, ticks. */
+  t: number;
+  /** Height of the clip origin above the ladder origin: on a rung, in whole climb cycles (two rungs). */
+  base: number;
+  /** Landing height mismatch spread over clip 170 (units; 0 on the rungs). */
+  fix: number;
+  /** Clip 170 is played backwards: getting on at the top. */
+  down: boolean;
+  /** Where the body stood when it grabbed, relative to the climb pose; fades out over LADDER_GRAB_TIME. */
+  grab: Vec3;
+  grabLeft: number;
+}
 
 /** Without animation data: per-gait speeds (m/s, already x1.75) and pelvis heights (m) measured from 000.iff. */
 const FALLBACK_SPEED = { run: 5.88, runSide: 4.8, walk: 2.18, walkSide: 1.76, crouch: 2.79 };
@@ -40,8 +76,6 @@ const FALLBACK_PELVIS = { stand: 0.95, run: 0.93, crouched: 0.43, crouchMove: 0.
 const PRONE_SPEED = 0.6 * METRE;
 const PRONE_EYE = 0.3 * METRE;
 const PRONE_HEIGHT = 0.6 * METRE;
-/** Ladder climb: clip 168 raises the pelvis 0.56 m per 0.7 s cycle, x1.75. */
-const LADDER_SPEED = 1.4 * METRE;
 /** Camera roll at full lean (IGI only shifts the eye; a small roll reads better on modern screens). */
 const LEAN_ROLL = (10 * Math.PI) / 180;
 /** Keep the leaning eye this far from walls. */
@@ -59,7 +93,7 @@ export function playerSystem(): GameSystem {
     async init(game) {
       const data = await loadPlayerData(game.vfs).catch((err) => {
         console.warn("player: using default parameters", err);
-        return { params: DEFAULT_PARAMS, materials: new Map(), footsteps: new Map() } as PlayerData;
+        return { params: DEFAULT_PARAMS, materials: new Map(), footsteps: new Map(), ladderSteps: new Map() } as PlayerData;
       });
       player = new Player(game, data);
       game.services.player = player;
@@ -137,6 +171,9 @@ class Player implements PlayerService {
   get thirdPerson() {
     return this.debugThirdPerson || this.climbing;
   }
+  private get climbing() {
+    return this.climb !== null;
+  }
   set thirdPerson(on: boolean) {
     this.debugThirdPerson = on;
   }
@@ -156,7 +193,13 @@ class Player implements PlayerService {
   private knock: [number, number] = [0, 0];
   /** Ground velocity of the last frame (for jumps and falls). */
   private walkVelocity: Vec3 = [0, 0, 0];
-  private climbing = false;
+  /** On a ladder (null otherwise). */
+  private climb: Climb | null = null;
+  /** The level's ladders (found on first use: they are placed by the world system). */
+  private ladderList: Ladder[] | null = null;
+  private landings = new Map<Ladder, number | null>();
+  /** The ladder just left: until the body is clear of it, it moves against real shapes only, not hulls. */
+  private clearOf: Ladder | null = null;
   private prone = false;
   /** 0 = standing eye offset above the pelvis, 1 = crouched offset; blends like the clips. */
   private low = 0;
@@ -222,6 +265,8 @@ class Player implements PlayerService {
     this.velocity = [0, 0, 0];
     this.spawned = true;
     this.grounded = false;
+    this.climb = null;
+    this.clearOf = null;
   }
 
   private get physics() {
@@ -254,8 +299,14 @@ class Player implements PlayerService {
     this.updateLean(dt, this.grounded && !this.climbing ? leanKey : 0, fwd > 0);
     const leaning = this.lean !== 0 || leanKey !== 0;
 
-    // Ladders: walking into a ladder model (magicobj.qvm TASKTYPE_LADDER, reported by physics) attaches to it.
-    if (!this.climbing && fwd > 0 && !leaning && this.stance === "stand" && this.ladderAhead()) this.climbing = true;
+    // Ladders (magicobj.qvm TASKTYPE_LADDER models): walking into one, or onto one's top from its landing, or pressing
+    // use while the ladder icon shows, gets on.
+    let grab: ReturnType<Player["ladderInReach"]> = null;
+    if (!this.climbing && this.grounded && !leaning && this.stance === "stand") {
+      grab = this.ladderInReach(fwd);
+      if (grab && (grab.moving || input.wasPressed("use"))) this.mountLadder(grab.ladder, grab.top);
+    }
+    this.game.services.hud?.action(grab && !this.climbing ? "ladder" : null);
 
     if (this.climbing) this.updateLadder(dt, fwd, input.wasPressed("jump"));
     else if (this.grounded) this.updateGround(dt, leaning ? 0 : fwd, leaning ? 0 : side, input.isDown("walk"), input.wasPressed("jump"));
@@ -361,64 +412,258 @@ class Player implements PlayerService {
     this.moveBody(dt, this.air);
   }
 
+  // --- ladders ---------------------------------------------------------------------------------------------------
+
+  private get ladders(): Ladder[] {
+    if (!this.ladderList) {
+      this.ladderList = findLadders(this.game);
+      if (this.ladderList.length) console.info(`player: ${this.ladderList.length} ladders`);
+    }
+    return this.ladderList;
+  }
+
+  /** A point in a ladder's frame: out from the rungs (towards the climber), along the rails, up from the origin. */
+  private ladderFrame(l: Ladder, p: Vec3) {
+    const dx = p[0] - l.origin[0], dy = p[1] - l.origin[1];
+    return { out: -(dx * l.face[0] + dy * l.face[1]), side: dx * l.face[1] - dy * l.face[0], up: p[2] - l.origin[2] };
+  }
+
+  /** Ladder space (x along the rails, y towards the wall, z up) → world, from the ladder origin. */
+  private ladderPoint(l: Ladder, x: number, y: number, z: number): Vec3 {
+    const [fx, fy] = l.face;
+    return [l.origin[0] + fy * x + fx * y, l.origin[1] - fx * x + fy * y, l.origin[2] + z];
+  }
+
+  /**
+   * Height of the floor at the top of a ladder where clip 170 puts the feet (0.4 m past the rungs, under the hooks:
+   * on a roof's parapet, a tower's deck), or null if the ladder leads nowhere walkable. Looked for from just above
+   * the rungs, under the hooks' tops.
+   */
+  private landing(l: Ladder): number | null {
+    if (this.landings.has(l)) return this.landings.get(l)!;
+    const p = this.ladderPoint(l, 0, this.clipRoot(CLIP.ladderTop, this.clipLength(CLIP.ladderTop))[1], 0);
+    const top = l.origin[2] + l.rungTop;
+    const z = this.physics?.groundHeight(p[0], p[1], top + 0.5 * METRE) ?? null;
+    const found = z !== null && z > top - 2 * METRE && z < top + 0.5 * METRE ? z : null;
+    this.landings.set(l, found);
+    return found;
+  }
+
+  /**
+   * The ladder Jones could get on from where he stands: at its foot, facing it (`moving` when walking into it), or on
+   * its landing at the top, by its hooks (`moving` when walking out over the edge).
+   */
+  private ladderInReach(fwd: number): { ladder: Ladder; top: boolean; moving: boolean } | null {
+    const feet = this.entity.position;
+    const look = direction(this.yaw);
+    for (const l of this.ladders) {
+      const f = this.ladderFrame(l, feet);
+      if (Math.abs(f.side) > l.halfWidth + LADDER_SLACK) continue;
+      const facing = look[0] * l.face[0] + look[1] * l.face[1];
+      if (f.out > 0 && f.out <= LADDER_REACH && f.up > l.bottom - 0.6 * METRE && f.up < l.rungTop - 1.8 * METRE && facing > 0.5) {
+        return { ladder: l, top: false, moving: fwd > 0 };
+      }
+      const landing = this.landing(l);
+      if (landing !== null && feet[2] > landing - METRE && feet[2] < landing + 0.5 * METRE && f.out < 0 && f.out > -LADDER_REACH) {
+        // Walking towards the edge: forward facing away from the wall, or backing onto it facing the wall.
+        if (Math.abs(facing) < 0.5) continue;
+        return { ladder: l, top: true, moving: fwd !== 0 && Math.sign(fwd) === -Math.sign(facing) };
+      }
+    }
+    return null;
+  }
+
+  /** Height of the climb clip's origin above the ladder origin for climb cycle `k`: on a rung, under the foot. */
+  private ladderBase(l: Ladder, k: number): number {
+    return l.rungPhase - LADDER_FOOT_RUNG + k * 2 * l.pitch;
+  }
+
+  private mountLadder(l: Ladder, top: boolean) {
+    const before: Vec3 = [...this.entity.position] as Vec3;
+    const up = before[2] - l.origin[2];
+    const step = 2 * l.pitch;
+    const b0 = this.ladderBase(l, 0);
+    let climb: Climb;
+    if (top) {
+      // Getting on at the top: clip 170 backwards, from stood on the landing down onto the rungs.
+      const end = this.topEnd();
+      const k = Math.round((up - end - b0) / step);
+      const base = this.ladderBase(l, k);
+      const t = this.clipLength(CLIP.ladderTop);
+      climb = { ladder: l, clip: CLIP.ladderTop, t, base, fix: up - (base + end), down: true, grab: [0, 0, 0], grabLeft: 0 };
+    } else {
+      // At the foot: the lowest cycle that does not put the feet below where they stand (by more than a little).
+      const k = Math.max(Math.ceil((up - b0 - 0.15 * METRE) / step), Math.ceil((l.bottom - b0 - 0.15 * METRE) / step));
+      climb = { ladder: l, clip: CLIP.ladder, t: 0, base: this.ladderBase(l, k), fix: 0, down: false, grab: [0, 0, 0], grabLeft: 0 };
+    }
+    this.climb = climb;
+    this.clips?.play(climb.clip, { speed: 0 });
+    this.clips?.seek(Math.min(climb.t, this.clipLength(climb.clip) - 1));
+    climb.grab = vec3.sub(before, this.climbFeet(climb));
+    climb.grabLeft = LADDER_GRAB_TIME;
+    this.lean = this.peek = 0;
+    this.air = [0, 0, 0];
+    this.walkVelocity = [0, 0, 0];
+    this.grounded = false;
+    this.clearOf = null;
+  }
+
+  private clipLength(id: number): number {
+    return this.clips?.clip(id)?.duration ?? (id === CLIP.ladderTop ? 11200 : 3360);
+  }
+
+  /** Root position of a clip at a time (model axes), with a fallback when animations are missing. */
+  private clipRoot(id: number, t: number): [number, number, number] {
+    const anim = this.clips?.clip(id);
+    if (anim) return rootAt(anim, t);
+    // Without 000.iff: straight up and over at the clips' rates.
+    const f = t / this.clipLength(id);
+    return id === CLIP.ladderTop ? [0, -1538 + 3173 * f, 6408 + 7550 * f] : [0, -1538, 3912 + 2507 * f];
+  }
+
+  /** Feet height above the clip origin at the end of clip 170 (stood on the landing). */
+  private topEnd(): number {
+    return this.clipRoot(CLIP.ladderTop, this.clipLength(CLIP.ladderTop))[2] - this.clipRoot(CLIP.ladder, 0)[2];
+  }
+
+  /** Where the clip's origin is now (on the rung plane; clip 170 also carries the landing fix). */
+  private climbOrigin(c: Climb): Vec3 {
+    const f = c.clip === CLIP.ladderTop ? c.t / this.clipLength(c.clip) : 0;
+    return this.ladderPoint(c.ladder, 0, 0, c.base + c.fix * f);
+  }
+
+  /** Feet (the entity position) for the climb pose: under the pelvis, at the pelvis height less a standing pelvis. */
+  private climbFeet(c: Climb): Vec3 {
+    const o = this.climbOrigin(c);
+    const r = this.clipRoot(c.clip, c.t);
+    const [fx, fy] = c.ladder.face;
+    const z0 = this.clipRoot(CLIP.ladder, 0)[2];
+    return [o[0] + fy * r[0] + fx * r[1], o[1] - fx * r[0] + fy * r[1], o[2] + r[2] - z0];
+  }
+
+  /**
+   * IGI's ladder: forward climbs, back climbs down, nothing else moves Jones (strafe and look leave him on the rungs);
+   * he gets off at the top (clip 170 onto the landing), at the foot (on the ground), or by jumping.
+   */
   private updateLadder(dt: number, fwd: number, jump: boolean) {
+    const c = this.climb!;
+    const l = c.ladder;
     this.gait = "ladder";
-    this.clips?.play(CLIP.ladder, { speed: fwd === 0 ? 0 : fwd });
-    if (jump) {
-      // Let go: drop back off the ladder.
-      this.climbing = false;
-      const back = direction(this.yaw + Math.PI);
-      this.air = [back[0] * METRE, back[1] * METRE, 0];
+    const rate = dt * ANIM_TICKS_PER_SECOND * this.data.params.rootMotionScale;
+    const length = this.clipLength(c.clip);
+    const before = c.t;
+    const steps = this.data.ladderSteps.get(c.clip) ?? (c.clip === CLIP.ladder ? [0, 1737] : [0, 1680, 3360, 5040]);
+    let crossed = false;
+
+    if (c.clip === CLIP.ladderTop) {
+      // Over the top (or back down onto the rungs from it): plays through whatever is pressed.
+      c.t = c.down ? Math.max(0, c.t - rate) : Math.min(length, c.t + rate);
+      crossed = steps.some((s) => (c.down ? s < before && s >= c.t : s > before && s <= c.t));
+      if (!c.down && c.t >= length) return this.leaveLadder("top", crossed);
+      if (c.down && c.t <= 0) {
+        c.clip = CLIP.ladder;
+        c.t = this.clipLength(CLIP.ladder);
+        c.fix = 0;
+        c.down = false;
+        this.clips?.play(CLIP.ladder, { speed: 0, blend: 0.1 });
+      }
+    } else if (jump) {
+      return this.leaveLadder("jump", false);
+    } else if (fwd > 0) {
+      c.t += rate;
+      if (c.t >= length) {
+        const landing = this.landing(l);
+        const end = this.topEnd();
+        if (landing !== null && landing - (l.origin[2] + c.base + end) <= l.pitch) {
+          // The landing is within a rung of where clip 170 ends: climb over the top, absorbing the difference.
+          c.clip = CLIP.ladderTop;
+          c.fix = landing - (l.origin[2] + c.base + end);
+          c.t = Math.min(c.t - length, rate);
+          this.clips?.play(CLIP.ladderTop, { speed: 0, blend: 0 });
+        } else if (c.base + 2 * l.pitch + LADDER_HANDS <= l.rungTop) {
+          c.t -= length;
+          c.base += 2 * l.pitch;
+        } else c.t = length;
+      }
+      if (c.clip === CLIP.ladder) crossed = steps.some((s) => (c.t >= before ? s > before && s <= c.t : s > before || s <= c.t));
+    } else if (fwd < 0) {
+      c.t -= rate;
+      if (c.t < 0) {
+        const below = this.ladderPoint(l, 0, -0.4 * METRE, c.base);
+        const ground = this.physics?.groundHeight(below[0], below[1], below[2] + 1.5 * METRE) ?? null;
+        const next = c.base - 2 * l.pitch;
+        const roomBelow = ground === null || l.origin[2] + next >= ground - 0.3 * METRE;
+        if (roomBelow && next >= l.bottom - l.pitch) {
+          c.t += length;
+          c.base = next;
+        } else return this.leaveLadder("bottom", false);
+      }
+      crossed = steps.some((s) => (c.t <= before ? s < before && s >= c.t : s < before || s >= c.t));
+    }
+    if (crossed) this.ladderStep();
+    this.clips?.seek(Math.min(c.t, this.clipLength(c.clip) - 1));
+    this.placeOnLadder(dt);
+  }
+
+  /** Put the entity on the climb pose, easing in from where the body stood when it grabbed. */
+  private placeOnLadder(dt: number) {
+    const c = this.climb!;
+    c.grabLeft = Math.max(0, c.grabLeft - dt);
+    const k = c.grabLeft / LADDER_GRAB_TIME;
+    const feet = vec3.add(this.climbFeet(c), vec3.scale(c.grab, k * k));
+    this.velocity = dt > 0 ? vec3.scale(vec3.sub(feet, this.entity.position), 1 / dt) : [0, 0, 0];
+    this.entity.position = feet;
+  }
+
+  /** A hand or foot on a rung: IGI's ladder step sounds, which soldiers hear as AIEVENT_LADDER. */
+  private ladderStep() {
+    const position: Vec3 = [...this.entity.position] as Vec3;
+    // The SoundDefs (common sounds.qvm FOOTSTEPS group) carry their volume; the player's own sounds are 2D.
+    this.game.services.audio?.play(pick(LADDER_SOUNDS));
+    this.game.events.emit("noise", { position, radius: LADDER_NOISE, sourceId: this.entity.id, kind: "ladder" });
+  }
+
+  private leaveLadder(how: "top" | "bottom" | "jump", step: boolean) {
+    const c = this.climb!;
+    const l = c.ladder;
+    if (step) this.ladderStep();
+    const feet = this.climbFeet(c);
+    this.climb = null;
+    this.clearOf = l;
+    this.velocity = [0, 0, 0];
+    if (how === "jump") {
+      this.entity.position = feet;
+      this.air = [-l.face[0] * LADDER_JUMP.back, -l.face[1] * LADDER_JUMP.back, LADDER_JUMP.up];
       this.grounded = false;
+      this.clips?.play(CLIP.fall);
       return;
     }
-    const before = this.entity.position;
-    // Hug the ladder: the structure's movement hull keeps the feet about a metre out when the climb starts.
-    const gap = this.ladderDistance();
-    const ahead = direction(this.yaw);
-    const pull = gap !== null && gap > LADDER_HUG ? Math.min(gap - LADDER_HUG, METRE * dt * 2) / Math.max(dt, 1e-3) : 0;
-    if (fwd > 0) {
-      // Going up, the body follows the rungs through whatever the ladder passes (water-tower decks overhang their
-      // ladders, with no opening in their collision).
-      const p = this.entity.position;
-      const rise = fwd * LADDER_SPEED * dt;
-      const moved = pull > 0 && this.physics ? this.physics.move(p, [ahead[0] * pull * dt, ahead[1] * pull * dt, rise], this.entity.radius, this.entity.height, { ignoreHulls: true }).position : p;
-      this.entity.position = [moved[0], moved[1], p[2] + rise];
+    // Stand where the clip left the feet: on the landing, or on the ground at the foot.
+    const ground = this.physics?.groundHeight(feet[0], feet[1], feet[2] + 0.6 * METRE) ?? null;
+    if (ground !== null && Math.abs(ground - feet[2]) < 0.6 * METRE) {
+      this.entity.position = [feet[0], feet[1], ground];
+      this.grounded = true;
+    } else {
+      this.entity.position = feet;
+      this.air = [0, 0, 0];
       this.grounded = false;
-    } else this.moveBody(dt, [ahead[0] * pull, ahead[1] * pull, fwd * LADDER_SPEED], true);
-    if (!this.ladderAhead()) {
-      // Top (or bottom) reached: step forward off the ladder.
-      this.climbing = false;
-      const ahead = direction(this.yaw);
-      if (fwd > 0) this.moveBody(0.25, [ahead[0] * 1.5 * METRE, ahead[1] * 1.5 * METRE, 0.5 * METRE]);
-    } else if (fwd < 0 && this.grounded && this.entity.position[2] >= before[2]) {
-      this.climbing = false;
     }
+    this.clips?.play(CLIP.stand);
   }
 
-  /** How far ahead of the feet a ladder is grabbed: ladder hulls (e.g. 435_02_1) stand 0.76 m proud of the rungs, so the feet stop about 1 m away. */
-  private ladderAhead(): boolean {
-    return this.ladderDistance() !== null;
-  }
-
-  /** Distance to the ladder in front (world units), or null if there is none within reach. */
-  private ladderDistance(): number | null {
-    const physics = this.physics;
-    if (!physics) return null;
-    const f = this.entity.position;
-    const ahead = vec3.scale(direction(this.yaw), LADDER_REACH);
-    // Knee, chest and head height: braces of the structure a ladder is fixed to can hide it at one of them.
-    let best: number | null = null;
-    for (const h of [0.3, 1.0, 1.6]) {
-      const from: Vec3 = [f[0], f[1], f[2] + h * METRE];
-      const hit = physics.raycast(from, vec3.add(from, ahead), { entities: false });
-      if (hit && (hit.ladder || (hit.part && /ladder/i.test(hit.part))) && (best === null || hit.distance < best)) best = hit.distance;
-    }
-    return best;
+  /** Still inside the hull of the ladder just left? Then moves ignore hulls, which close over ladders. */
+  private nearLadderLeft(): boolean {
+    const l = this.clearOf;
+    if (!l) return false;
+    const f = this.ladderFrame(l, this.entity.position);
+    const inside =
+      Math.abs(f.out) < LADDER_CLEAR && Math.abs(f.side) < l.halfWidth + LADDER_CLEAR && f.up > l.bottom - METRE && f.up < l.rungTop + 2 * METRE;
+    if (!inside) this.clearOf = null;
+    return inside;
   }
 
   /** Move the feet through physics, handle ground snapping, take-off into a fall, and landing. */
-  private moveBody(dt: number, v: Vec3, climbing = false) {
+  private moveBody(dt: number, v: Vec3) {
     const physics = this.physics;
     const knock: Vec3 = [this.knock[0], this.knock[1], 0];
     const delta = vec3.scale(vec3.add(v, knock), dt);
@@ -427,17 +672,15 @@ class Player implements PlayerService {
     let next: Vec3;
     let grounded: boolean;
     if (physics) {
-      // On a ladder only the real shapes hold the body: towers' movement hulls close over their ladders.
-      const r = physics.move(feet, delta, this.entity.radius, this.entity.height, { ignoreHulls: climbing, entityId: this.entity.id });
+      // Just off a ladder only the real shapes hold the body: ladders' and towers' movement hulls close over the rungs.
+      const r = physics.move(feet, delta, this.entity.radius, this.entity.height, { ignoreHulls: this.nearLadderLeft(), entityId: this.entity.id });
       next = r.position;
       grounded = r.grounded;
     } else {
       next = vec3.add(feet, delta);
       grounded = wasGrounded;
     }
-    if (climbing) {
-      this.grounded = grounded && delta[2] <= 0;
-    } else if (wasGrounded) {
+    if (wasGrounded) {
       if (!grounded) {
         // Ground snap: stay on slopes and down small steps (0.5 m) instead of falling.
         const ground = physics?.groundHeight(next[0], next[1], next[2] + 0.1 * METRE);
@@ -458,7 +701,7 @@ class Player implements PlayerService {
       // Still rising through a step the physics stood us on: stay airborne.
       grounded = false;
     }
-    if (!climbing) this.grounded = grounded;
+    this.grounded = grounded;
     this.velocity = dt > 0 ? vec3.scale(vec3.sub(next, feet), 1 / dt) : [0, 0, 0];
     this.entity.position = next;
   }
@@ -572,7 +815,8 @@ class Player implements PlayerService {
     this.entity.alive = false;
     this.entity.health = 0;
     this.gait = "dead";
-    this.climbing = false;
+    this.climb = null;
+    this.game.services.hud?.action(null);
     this.lean = this.peek = 0;
     this.sound(`player_death_${1 + Math.floor(Math.random() * 3)}`);
     this.clips?.play(this.lastHitPart === "head" ? CLIP.deathHead : pick(CLIP.death));
@@ -632,6 +876,8 @@ class Player implements PlayerService {
         ? PRONE_EYE
         : this.pelvisHeight() + PHYSICS.eyeAbovePelvis + (PHYSICS.eyeAbovePelvisLow - PHYSICS.eyeAbovePelvis) * this.low;
     if (this.dead) target = 0.25 * METRE;
+    // On a ladder the feet already ride the clip's pelvis (see climbFeet), so the eye sits a standing pelvis above.
+    if (this.climb) target = this.clipRoot(CLIP.ladder, 0)[2] + PHYSICS.eyeAbovePelvis;
     this.eyeHeight += (target - this.eyeHeight) * (1 - Math.exp(-dt * (this.dead ? 2 : 25)));
 
     // Lean: sideways offset, shortened when a wall is in the way.
@@ -656,7 +902,17 @@ class Player implements PlayerService {
     if (this.body) {
       this.body.object.visible = showBody;
       if (showBody) {
-        this.body.place(game.local(feet), this.yaw);
+        const c = this.climb;
+        if (c) {
+          // The body is posed with its root held at the clip's first key, so it stands at the clip origin plus the
+          // root's travel since then, facing the rungs.
+          const r0 = this.clipRoot(c.clip, 0), r = this.clipRoot(c.clip, c.t);
+          const [fx, fy] = c.ladder.face;
+          const dx = r[0] - r0[0], dy = r[1] - r0[1];
+          const o = this.climbOrigin(c);
+          const grab = vec3.scale(c.grab, (c.grabLeft / LADDER_GRAB_TIME) ** 2);
+          this.body.place(game.local(vec3.add([o[0] + fy * dx + fx * dy, o[1] - fx * dx + fy * dy, o[2]], grab)), c.ladder.yaw);
+        } else this.body.place(game.local(feet), this.yaw);
         this.body.pose();
       }
     }

@@ -59,12 +59,37 @@ Clip time runs at 4800 ticks per second. Looping clips have flag bit 31. Movemen
 | walk | 57 | 74 | 72 | 75 | 77 | 76 | 81 | 80 | 2 |
 | crouch | 17 | 41 | 39 | 27 | 49 | 47 | 29 | 28 | 19 |
 
-Jump 25 (played at 0.4x), fall 2, ladder climb 168, deaths 201/202 (head 204). Speed = root displacement over one
+Jump 25 (played at 0.4x), fall 2, ladder climb 168 and over the top 170, deaths 201/202 (head 204). Speed = root displacement over one
 cycle x1.75: run forward 5.88 m/s, run strafe/back ~4.8, walk forward 2.18, crouch 2.79.
 
 **Footstep events.** Each clip's `BOED` chunk holds 24-byte records `{u32 type, u32 bone, f32 time, vec3 offset}`.
 Type 1010 is a footstep; the bone is the landing foot (22 / 27). Run and crouch-move clips have two per cycle; the walk
-forward/strafe clips and the idle clips have none, so walking is silent.
+forward/strafe clips and the idle clips have none, so walking is silent. Type 8 marks the hand-and-foot steps of the
+ladder clips: two per cycle in 168 (ticks 0 and 1737), four in 170 (0, 1680, 3360, 5040).
+
+## Ladders (*data*; see also dynamic.md)
+
+Ladders are `TASKTYPE_LADDER` models (magicobj.qvm), placed as attachments of the buildings and towers they lean on.
+They share one layout: rails 0.54 m apart along model X at Y ≈ 0, from Z = 0 up, an alpha-tested plane of rungs
+between them (one 64x64 texture repeat per rung: a rung every 0.306 m, the first 0.29 m up), and the rails' tops
+hooked over towards -Y onto the roof or deck. The climber stands on +Y facing -Y.
+
+- **Clip 168** (climb, 0.7 s loop): its origin is on the rung plane, the pelvis 0.375 m out from it and rising
+  0.612 m per cycle, exactly two rungs (one per hand). The planted foot is on a rung 1200 units above the clip origin,
+  so the clip is laid with its origin a whole number of cycles up the rungs. It plays at the root-motion multiplier
+  (x1.75) so the body keeps pace with its own hands: 1.53 m/s.
+- **Clip 170** (2.33 s) starts from 168's end pose and climbs over the top: 1.84 m up and 0.77 m forward, ending
+  stood 2.45 m above its origin and 0.40 m past the rungs (on the parapet or deck edge under the hooks). Played
+  backwards it takes Jones from the landing onto the rungs. The top is taken when the landing there is within a rung
+  of where 170 ends; the difference is spread over the clip.
+- Sounds: `walk_ladder_1..4` (common sounds.qvm FOOTSTEPS group, volume 0.6, 30 m) on each type 8 event. The ladder
+  faces are tagged Fence, whose step sounds (`walk_metal_*`) are for walking on fences, not climbing.
+- IGI shows the climb in third person. Forward climbs, back climbs down, nothing else moves Jones; he gets off at the
+  top (170), at the foot (onto the ground) or by jumping. A ladder's movement hull (0.76 m proud of its rungs) and
+  its tower's hull close over the climber, so after getting off Jones moves against real shapes only until he is
+  1.2 m clear of the rungs.
+- Getting on: walk into a ladder's foot (within 1.3 m, facing it) or out over its top from the landing, or press use
+  while the ladder icon (`status.res` `a_ladder`) shows.
 
 ## `material/material.qvm` (*data*)
 
@@ -79,5 +104,4 @@ textiles, rugs, snow and glass. A crouched player raises no footstep noise (*exe
 - Prone (key Z): IGI 1 has no prone. Eye 0.3 m, 0.6 m/s.
 - Lean on Q/E with a 10° camera roll (IGI leans with Peek + strafe and only shifts the eye). The eye stops 0.25 m
   short of walls. As in IGI the player does not move while leaning.
-- Ladders: attach when walking into a surface whose physics material matches `ladder` (`MetalLadder`); climb at
-  1.4 m/s. No level places ladder tasks; they are part of building collision meshes.
+- Ladders: the jump-off push (2 m/s back, 1 m/s up) and the 10 m radius soldiers hear ladder steps in are ours.

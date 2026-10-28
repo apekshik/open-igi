@@ -116,6 +116,8 @@ export interface PhysicsService {
    * (see DynamicCollider.setMatrix). Returns null if the model has no usable collision.
    */
   addDynamic?(model: string, matrix: ArrayLike<number>, options?: { entityId?: number }): DynamicCollider | null;
+  /** Climbable ladder models (magicobj.qvm TASKTYPE_LADDER), for finding the ladders placed in the level. */
+  readonly ladders?: ReadonlySet<string>;
   /** Timing of the last frame's dynamic-collider work (carry and push), for profiling. */
   dynamicStats?(): { colliders: number; moved: number; carried: number; pushed: number; ms: number };
 }

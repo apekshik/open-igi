@@ -105,6 +105,11 @@ export class ClipPlayer {
     return true;
   }
 
+  /** Put the playing clip at a time (ticks): for clips driven from outside, such as the ladder climb. */
+  seek(time: number) {
+    if (this.current) this.current.time = Math.max(0, Math.min(this.current.anim.duration, time));
+  }
+
   /** Advance by dt seconds, calling `onEvent(time)` for each of `events` (ticks in the playing clip) crossed. */
   advance(dt: number, events?: readonly number[], onEvent?: (time: number) => void) {
     if (this.previous) {
