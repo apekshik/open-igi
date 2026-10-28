@@ -57,6 +57,12 @@ objective area). The player is frozen and the camera scripted while its `HumanPl
 container. Area tests keep the player's last answer while it does not exist, because outro conditions test the very
 `AreaActivate` that started them.
 
+Static models (`EditRigidObj`, `Building`) inside containers follow the same rule (`Placement.gates`, tested with
+`gatesOpen()` in `src/game/mission/gates.ts`): the world system draws them and physics collides with them only while
+every enclosing container runs. Levels 3 and 5 put an invisible `colbox` across the elevator doorway inside a
+container on `Elevator_N.isMoving`; level 2 swaps each SAM site for its wreck and shows the planted C4 that way.
+AI scripts read task fields (`EditVariable_752.nValue`) through the same evaluator.
+
 ### Task types and fields
 
 Parameters are named from each script's `Task_DeclareParameters`; `ObjectPos`/`Real32x3`/`RGB` take three values,
@@ -86,6 +92,14 @@ Parameters are named from each script's `Task_DeclareParameters`; `ObjectPos`/`R
 | Elevator | SplineObj (waypoints = floors), Max speed, Can start, Wanted floor 0..9, Floor up/down | `vFloor`, `isMoving` |
 | HumanSoldier, HumanPlayer, Car, Heli, GunPickup | (other systems' entities, by task id) | `isDead`, `isExploded`, `isPickedUp` |
 | HumanAI | (child of a soldier) | `isDetection` (the soldier is alert/in combat) |
+
+- **Door** open/close expressions trigger on their rising edge. Elevator doors open on `Elevator_N.vFloor == k`, which
+  stays true while the car waits; as a level it would reopen the doors the tick a call button closed them, so the
+  car's `Can start` (its doors closed) never held.
+- **Elevator** call buttons pulse for one tick and close the doors at the same time, so a wanted floor is remembered
+  until `Can start` holds.
+- **DefineComputerObjective**: only the last valid one is listed. Level 3 is the only level with several; its second
+  and third sets are both valid after the hack and both list `M3_OBJ3`.
 
 Alarm logic is entirely scripted: an `AlarmControl`'s trigger watches alarm pads (`Switch.isLastPressed`) and camera
 detection, an `EditVariable` latches the alarm, and `isAlarm` reads it back. When an AI soldier raises the alarm

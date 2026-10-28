@@ -6,12 +6,21 @@ import { METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Game, GameSystem } from "../game.ts";
 import type { Placement } from "../../level/objects.ts";
 import type { GroundHit, MoveOptions, MoveResult, PhysicsService, RayHit, RaycastOptions } from "./api.ts";
+import { gatesOpen } from "../mission/gates.ts";
 import { buildCollisionWorld, type PlacedModel } from "./load.ts";
 import type { CollisionWorld, GroundInfo } from "./world.ts";
 
 export function physicsSystem(): GameSystem {
+  let gated: { index: number; gates: number[]; on: boolean }[] = [];
+  let collision: CollisionWorld | null = null;
   return {
     name: "physics",
+    update(_dt, game) {
+      for (const g of gated) {
+        const on = gatesOpen(game, g.gates);
+        if (on !== g.on) collision?.setObjectEnabled(g.index, (g.on = on));
+      }
+    },
     async init(game) {
       const started = performance.now();
       const placed: PlacedModel[] = [];
@@ -34,6 +43,10 @@ export function physicsSystem(): GameSystem {
       // Terrain columns around the start, so the first shots and steps don't pay for building them.
       const columns = world.terrain?.prewarm(game.origin[0], game.origin[1], PREWARM_RADIUS) ?? 0;
       game.services.physics = new IgiPhysics(game, world);
+      // Models inside ConditionalContainers (elevator-shaft blockers that exist only while the car moves, intact and
+      // destroyed variants) collide only while their containers run.
+      gated = world.objects.flatMap((o, index) => (o.gates?.length ? [{ index, gates: o.gates, on: true }] : []));
+      collision = world;
       const s = world.stats;
       console.info(
         `physics: ${s.objects} objects, ${s.hitTriangles} hit + ${s.hullTriangles} hull triangles, ${columns} terrain columns, ` +

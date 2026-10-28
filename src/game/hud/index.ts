@@ -159,13 +159,18 @@ class Hud {
     const playerId = () => this.game.services.player?.entity.id ?? -1;
     this.off.push(
       ev.on("message", (m) => this.message(m.text, m.seconds)),
+      // StatusMessageScreen_ClearMessages(): gameplay containers clear the intro subtitles when they start.
+      ev.on("status:clear", () => (this.messages.length = 0)),
       ev.on("objective", (o) => {
+        // The mission system already shows IGI's own "Objective 1 Complete." for completed and failed objectives.
+        if (this.game.services.mission && o.state !== "active") return;
         const text = o.text ?? this.game.services.mission?.objectives()[o.index]?.text ?? `Objective ${o.index + 1}`;
         const verb = o.state === "completed" ? "Objective completed" : o.state === "failed" ? "Objective failed" : "New objective";
         this.message(`${verb}: ${text}`, 5);
       }),
       ev.on("pickup", (p) => {
-        if (p.ownerId !== playerId()) return;
+        // Mission items (keycards, C4) are announced by the level's own status messages.
+        if (p.ownerId !== playerId() || p.item.startsWith("GenericPickup_")) return;
         const key = weaponKey(p.item);
         const icon = this.sprites.get(WEAPON_ICONS[key] ?? "") ?? this.sprites.get(/ammo|clip/i.test(p.item) ? "ammo" : "weapon");
         const name = this.game.services.weapons?.inventory().find((w) => w.id === p.item)?.name ?? prettyItem(p.item);
