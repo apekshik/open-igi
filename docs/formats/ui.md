@@ -39,7 +39,7 @@ Both are version 9 LOOP textures (`decodeTexArray`). The header word at +0x1C po
 Notable sprites: `status.res` `powerbarbackground` (64×78 health outline, the figure's head at x≈30) with
 `powerbar` (23×70 red figure, drawn at +19,+2 and cropped from the feet up by health); `mapsphere`/`mapcircle`
 quarter disc and quarter ring with the circle centre at their bottom-right corner (four rotated copies make the
-compass dial); `cross` (9×9 crosshair); weapon icons; `a_*`/`action_*` context icons; `progressbar` (240×32).
+compass dial; IGI's north is world -Y, east -X, see `NORTH_YAW` in src/game/hud/map.ts, and the map computer draws north up); `cross` (9×9 crosshair); weapon icons; `a_*`/`action_*` context icons; `progressbar` (240×32).
 `menusystem.res` `win1_*`/`win2_*` are 8-piece window frames: 1/3/5/7 corners clockwise from top-left, 2/6 top and
 bottom edges, 4/8 right and left edges. `slide_1/2/3` are slider left arrow, right arrow and knob; `slidevert_*` the
 vertical versions; `glow.spr` is the highlight behind the selected menu item; `pointer.spr` the mouse pointer.
