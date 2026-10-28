@@ -22,3 +22,5 @@ out/
 
 # Local machine settings (IGI_DATA path).
 .env.local
+.vercel
+.env*
