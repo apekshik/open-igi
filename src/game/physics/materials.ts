@@ -1,0 +1,62 @@
+// Surface materials from the game's own tables:
+//   material/material.qvm: SetActiveMaterial(n); DefineQMaterial(transparency, ...); DefineGameMaterial(name,
+//                          ?, ?, ?, passThrough, ...footstep, landing and bullet-impact sounds, decals...)
+//   terrain/terrain.qvm:   CreateTerrainMaterial(terrainMaterial, gameMaterial, ...per-level texture settings)
+// Collision faces (CMAT) and terrain triangles both resolve to a game material id from material.qvm.
+
+import { decodeQvm, type QvmValue } from "../../formats/qvm.ts";
+import type { Vfs } from "../../vfs/vfs.ts";
+
+export interface GameMaterial {
+  id: number;
+  /** "Ground", "Wood", "Concrete", "Glass", "HumanCollision", ... */
+  name: string;
+  /**
+   * DefineQMaterial's first value: 1 for Air, Glass and the invisible collision materials, 0.8 for Fence, 0
+   * otherwise. Read as how much the surface lets sight through.
+   */
+  transparency: number;
+  /**
+   * DefineGameMaterial's fifth value: TRUE for Air, Water, Carton, Snow and the invisible collision materials
+   * (HumanCollision, MetalLadder, MetalFence). We treat it as "not a solid surface for bullets" on model faces.
+   */
+  passThrough: boolean;
+}
+
+/** Built-in fallback names (material.qvm order in the retail game) if the script is missing. */
+const DEFAULT_NAMES = [
+  "Air", "Ground", "Water", "Wood", "Carton", "StrongMetal", "NormalMetal", "SoftMetal", "Flesh", "BloodyFlesh",
+  "Textiles", "Concrete", "Runway", "Rug", "Glass", "Plastic", "Porcelain", "Rubber", "Fence", "Gravel", "Snow",
+  "HumanCollision", "MetalLadder", "MetalFence",
+];
+
+const isTrue = (v: QvmValue | undefined) => typeof v === "object" && "ident" in v && v.ident === "TRUE";
+const num = (v: QvmValue | undefined) => (typeof v === "number" ? v : 0);
+
+export async function loadGameMaterials(vfs: Vfs): Promise<GameMaterial[]> {
+  const fallback = DEFAULT_NAMES.map((name, id) => ({ id, name, transparency: 0, passThrough: false }));
+  if (!vfs.has("material/material.qvm")) return fallback;
+  const out: GameMaterial[] = [];
+  let active = 0;
+  let transparency = 0;
+  for (const call of decodeQvm(await vfs.read("material/material.qvm"))) {
+    if (call.fn === "SetActiveMaterial") active = num(call.args[0]);
+    else if (call.fn === "DefineQMaterial") transparency = num(call.args[0]);
+    else if (call.fn === "DefineGameMaterial") {
+      out[active] = { id: active, name: String(call.args[0]), transparency, passThrough: isTrue(call.args[4]) };
+      transparency = 0;
+    }
+  }
+  return out.length ? out : fallback;
+}
+
+/** terrain.qvm: game material id for each terrain material index (1 = Ground, 20 = Snow in the retail levels). */
+export async function loadTerrainGameMaterials(vfs: Vfs, level: string): Promise<number[]> {
+  const path = `missions/location0/${level}/terrain/terrain.qvm`;
+  if (!vfs.has(path)) return [];
+  const out: number[] = [];
+  for (const call of decodeQvm(await vfs.read(path))) {
+    if (call.fn === "CreateTerrainMaterial") out[num(call.args[0])] = num(call.args[1]);
+  }
+  return out;
+}

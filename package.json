@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "inventory": "node --experimental-strip-types tools/inventory.ts",
     "chunks": "node --experimental-strip-types tools/chunks.ts",
-    "qvm": "node --experimental-strip-types tools/qvm.ts"
+    "qvm": "node --experimental-strip-types tools/qvm.ts",
+    "collision": "node --experimental-strip-types tools/collision.ts"
   },
   "dependencies": {
     "three": "^0.170.0"

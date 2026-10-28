@@ -61,3 +61,13 @@ source-available).
 Read for research only; no code from it is used. Its notes on type 1 models (`docs/mef_model_types.md`: the skin
 fields and that `XTRV` holds render plus skinning-only vertices) pointed us at the extra influence records, and its bone
 names for the 33-bone rigs agree with the bone order documented in `docs/FORMATS.md`.
+
+## Physics and collision (hjcminus/Project-IGI-Terrain, flawme/igi-reverse-engineering)
+
+`src/game/physics/terrain.ts` ports the terrain height query of hjcminus/Project-IGI-Terrain (MIT, above):
+`Terrain::GetZ`/`RecursiveGetZ` in `source/level/terrain.cpp`, i.e. walking to the leaf cube under a point, visiting
+each x/y quadrant's upper cube before its lower one, and taking the plane of the first upward triangle that contains
+the point. flawme/igi-reverse-engineering's `.mef` notes (`reverse/docs/16-verified-formats`, `reverse/tools/mef_deep.py`)
+gave the collision chunk sizes, the `CMSH` descriptor layout (counts on disk, pointers at run time), the `CFCE`
+record and the `MESH` collision totals at `+0x6C`/`+0x70`, which `src/formats/collision.ts` builds on (see
+`docs/formats/collision.md`).
