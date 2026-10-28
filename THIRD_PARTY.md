@@ -113,6 +113,15 @@ the `language/*.res` files and `LevelFlow_GetBreakCutSceneKey` among the script 
 `src/game/mission/`. The value of `GAME_FREQUENCY` (30) was read from IGI.exe's script constant table by us; the
 remaining task semantics come from reading the levels' own objects.qvm scripts. See `docs/formats/mission.md`.
 
+## flawme/igi-reverse-engineering: AI
+
+The same project's AI notes (`reverse/docs/05-ai-system`: the `AIEVENT_`/`AIAction_`/`AIFunction_` names read from
+`IGI.exe`) and graph notes (`reverse/docs/16-verified-formats`: the `.dat` magic, the routing table's layout and
+meaning, the field-name hash and the 11 registered field names, and the existence of level 8's second layout) are the
+basis of `src/formats/graph.ts` and the script runner in `src/game/ai/`. The token grammar, level 8's layout, the
+patrol command ids, the soldier clip ids and the behaviour model are our own reading of the game files; see
+`docs/formats/ai.md`.
+
 ## World rendering: sky, fog and level of detail
 
 The sky and fog in `src/render/sky.ts` and `src/game/world/environment.ts` follow hjcminus/Project-IGI-Terrain (MIT,
