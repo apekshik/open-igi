@@ -4,7 +4,8 @@
 import { direction, METRE, vec3, type Vec3 } from "../coords.ts";
 import type { GameSystem } from "../game.ts";
 import type { MissionService, Objective, UsePrompt } from "./api.ts";
-import { CutSceneTask, DoorTask, isUsable, MissionLogic, type LogicTask, type Usable } from "./logic.ts";
+import { Carriers, carry, carryDirection, turned, turnView } from "./carriers.ts";
+import { CutSceneTask, DoorTask, GAME_FREQUENCY, isUsable, MissionLogic, type LogicTask, type Usable } from "./logic.ts";
 import { MissionObjects } from "./objects.ts";
 import { pvec, taskTree } from "./tasks.ts";
 import { briefingLines, loadStrings, missionInfo } from "./text.ts";
@@ -17,6 +18,7 @@ const ALARM_CHECK_DELAY = 0.5;
 export function missionSystem(): GameSystem {
   let logic: MissionLogic;
   let objects: MissionObjects;
+  let carriers: Carriers;
   let hold: { task: LogicTask & Usable; time: number } | null = null;
   let target: (LogicTask & Usable) | null = null;
   let frozeByUs = false;
@@ -43,6 +45,7 @@ export function missionSystem(): GameSystem {
           lineOfSight: (a, b) => game.services.physics?.lineOfSight(a, b) ?? true,
           ground: (x, y, z, ignoreTaskId) => objects?.ground(x, y, z, ignoreTaskId) ?? null,
           train: (id) => game.services.world?.train(id),
+          resetTrain: (id) => game.services.world?.resetTrain?.(id),
           modelExtent: (model) => objects?.modelExtent(model) ?? null,
           route: (graph, from, node) => {
             const ai = game.services.ai;
@@ -59,6 +62,7 @@ export function missionSystem(): GameSystem {
       );
       for (const e of logic.errors) console.warn(`[mission] ${e}`);
       objects = new MissionObjects(game, logic);
+      carriers = new Carriers(game, logic);
 
       // Sounds: the audio system resolves level sound conditions (ConditionalSound, AmbientArea containers) against
       // our task state; object sounds come from the objects.qvm parameters (SoundDef names).
@@ -157,6 +161,23 @@ export function missionSystem(): GameSystem {
           const t = objects.entityTasks.get(entityId);
           return t instanceof DoorTask && t.active ? { open: t.open, moving: t.moving, locked: t.isLocked() } : null;
         },
+        rider: (aiId) => {
+          const c = carriers.ofCharacter(aiId);
+          if (!c) return null;
+          const ai = logic.tree.byKey.get(`HumanAI_${aiId}`);
+          const seat = ai?.parent;
+          if (!seat) return null;
+          const position = pvec(seat, "Position");
+          const gamma = Number(seat.params["Gamma"]) || 0;
+          return () => {
+            const now = c.current();
+            if (!now) return { position, yaw: gamma, hidden: true };
+            // Seated in the cabin: the body pitches and banks with its vehicle too.
+            const body = (v: Vec3) => carryDirection(v, c.reference, now);
+            const basis: [Vec3, Vec3, Vec3] = [body([Math.cos(gamma), Math.sin(gamma), 0]), body([-Math.sin(gamma), Math.cos(gamma), 0]), body([0, 0, 1])];
+            return { position: carry(position, c.reference, now), yaw: gamma + turned(c.reference, now), basis };
+          };
+        },
         openDoor: (_entityId, doorEntityId) => {
           const t = objects.entityTasks.get(doorEntityId);
           if (!(t instanceof DoorTask) || !t.active || !t.physical || t.isLocked()) return false;
@@ -240,7 +261,8 @@ export function missionSystem(): GameSystem {
       wasCutscene = cut;
     }
     if (!cut || cut.keys.length === 0) return;
-    const t = cut.keyTime;
+    // Between logic ticks, as moving objects are drawn.
+    const t = cut.keyTime + (logic.alpha / GAME_FREQUENCY) * cut.scale;
     let i = cut.keys.length - 1;
     while (i > 0 && cut.keys[i].start > t) i--;
     const a = cut.keys[i];
@@ -248,16 +270,27 @@ export function missionSystem(): GameSystem {
     const f = b && a.smooth && a.duration > 0 ? Math.min(1, (t - a.start) / a.duration) : 0;
     const s = f * f * (3 - 2 * f);
     const lerp = (x: number, y: number) => x + (y - x) * s;
-    const eye: Vec3 = b ? [lerp(a.position[0], b.position[0]), lerp(a.position[1], b.position[1]), lerp(a.position[2], b.position[2])] : a.position;
+    let eye: Vec3 = b ? [lerp(a.position[0], b.position[0]), lerp(a.position[1], b.position[1]), lerp(a.position[2], b.position[2])] : a.position;
     let yaw = b ? lerpAngle(a.gamma, b.gamma, s) : a.gamma;
+    // "Link task ID": the camera rides a moving object (the helicopter, a train car), placed relative to it as the
+    // level places both, and turns with it.
     // Alpha is measured from straight down: -PI/2 looks at the horizon.
     let pitch = (b ? lerp(a.alpha, b.alpha) : a.alpha) + Math.PI / 2;
-    const roll = b ? lerp(a.beta, b.beta) : a.beta;
+    let roll = b ? lerp(a.beta, b.beta) : a.beta;
+    // "Link task ID": the camera rides a moving object (the helicopter, a train car), placed relative to it as the
+    // level places both, and turns, pitches and banks with it.
+    const link = a.link >= 0 ? carriers.byId(a.link) : null;
+    const now = link?.current();
+    if (link && now) {
+      eye = carry(eye, link.reference, now);
+      ({ yaw, pitch, roll } = turnView(yaw, pitch, roll, link.reference, now));
+    }
     const look = a.target >= 0 ? targetPosition(game, a.target) : null;
     if (look) {
       const d = vec3.sub(look, eye);
       yaw = Math.atan2(-d[0], d[1]);
       pitch = Math.atan2(d[2], Math.hypot(d[0], d[1]));
+      roll = b ? lerp(a.beta, b.beta) : a.beta;
     }
     // FOV is horizontal, 1 = 90 degrees; three.js wants vertical degrees.
     const h = (b ? lerp(a.fov, b.fov) : a.fov) * (Math.PI / 2);
@@ -270,6 +303,11 @@ export function missionSystem(): GameSystem {
     if (e) return [e.position[0], e.position[1], e.position[2] + e.height / 2];
     const n = logic.tree.byId.get(id);
     if (!n) return null;
+    if (n.type === "Train") {
+      // A train car: look at its middle, a couple of metres up.
+      const pose = carriers.of(n)?.current();
+      return pose ? [pose.origin[0], pose.origin[1], pose.origin[2] + 2 * METRE] : null;
+    }
     const p = n.params["Position"] ?? n.params["Holder Position"] ?? n.params["Position start"];
     return Array.isArray(p) ? [p[0], p[1], p[2]] : null;
   }

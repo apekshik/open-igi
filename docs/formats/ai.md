@@ -20,7 +20,8 @@ and any number of `PatrolPath` tasks, each a list of `PatrolPathCommand(Command,
 
 Where a character sits in the tree decides when it exists. Characters inside a `CutScene`, `Heli`, `Car`, `Train` or
 `AnimTask`, or inside a `ConditionalContainer` whose name says cutscene ("Intro cutscene", level 3's "Intro cutscnee")
-belong to cutscenes and vehicles and are only spawned on request (`AiService.spawn`). The rest wait for every
+belong to cutscenes and vehicles. Cutscene characters are actors that enter play with their containers (below); vehicle
+passengers outside cutscenes are only spawned on request (`AiService.spawn`). The rest wait for every
 enclosing `ConditionalContainer` to run (`ConditionalContainer_<id>.isRun`, asked through the mission system): level
 1's guards live in "Main character and status messages", which runs once the intro cutscene is over. A `HumanSoldier`
 under a `GuardGenerator` ("Generate guards" condition, "Max spawns") is a template: copies spawn while the condition
@@ -144,9 +145,23 @@ not climb ladders. Nothing in the scripts, settings or IGI.exe's AI strings refe
 ## Containers, cutscenes and passengers
 
 A character that entered play because its ConditionalContainers run is removed (AIEVENT_DELETE first; body, entity
-and gun go) when one of them stops, and spawns afresh if it runs again. Cutscene and vehicle characters are spawned
-only through `AiService.spawn(taskId, { passenger: { anchor } })`: passive (no senses, no fighting) and carried by the
-anchor every frame. No system exposes Heli, Car or Train transforms yet, so nothing calls it.
+and gun go) when one of them stops, and spawns afresh if it runs again.
+
+**Cutscene actors.** Characters inside an intro or outro cutscene container (Jones in the insertion helicopter, Anya at
+her terminal, the guards the handycam films, Jones at the wheel of Mission 1's truck) enter and leave play on the frame
+their containers start and stop (checked every frame, after the mission logic). They are passive (no senses, no
+fighting, invulnerable) but run their HumanAI scripts, which is all a cutscene needs: the scripts answer AIEVENT_IDLE
+with `AIAction_PlayAnimation` (often gated on the cutscene clock, `CutScene_1200.nTick > 547`) or a PatrolPath whose
+commands play a "predefined animation" (240/241 sitting in a helicopter, 243 lying on a flatcar, 242 jumping from the
+helicopter, 239 jumping off the train, 244 jumping out of a landed helicopter). They stand exactly where they are
+placed (no snapping to the ground) and carry only the guns their tasks give them. A finished one-shot clip leaves its
+root motion with the actor (falls and climbs, not posture changes), so a jump ends where it lands.
+
+**Riders.** An actor rides a vehicle when its HumanSoldier is inside a `Heli`/`Car`/`Plane`/`Train` task, or when
+its AI graph is: Mission 1's Jones jumping onto the train walks graph 2, placed in one of the train's cars, and the
+outro's driver walks graph 15 in the truck. `MissionService.rider(aiId)` gives its seat every frame: the placement
+carried from the vehicle's level pose to its current one (pitch and bank too), hidden while the vehicle is not in play.
+`AiService.spawn(taskId, { passenger: { anchor } })` takes the same kind of seat for passengers outside cutscenes.
 
 ## Spacing
 

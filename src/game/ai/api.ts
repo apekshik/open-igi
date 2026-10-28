@@ -34,13 +34,15 @@ export interface AiService {
   byTask(taskId: number): AiCharacter | undefined;
   /**
    * Spawn a character that was not spawned at level start, by its HumanSoldier task id. Returns the existing one if it
-   * is already in play. Characters placed inside cutscenes and vehicles (Heli, Car, Train, AnimTask) spawn only
-   * through this call, passive by default (no senses, no fighting): pass `passenger.anchor` to carry them with their
-   * vehicle (called every frame; feet position and heading in IGI units, or null to leave them where they are), or
-   * `passive: false` to let them fight. Like every character inside a ConditionalContainer, they leave play when
-   * the container stops.
+   * is already in play. Cutscene actors (characters inside intro/outro cutscene containers) enter and leave play by
+   * themselves with their containers, playing their scripted animations, riding with their vehicles through
+   * `MissionService.rider`. Other characters placed in vehicles (Heli, Car, Train, AnimTask) spawn only through this
+   * call, passive by default (no senses, no fighting): pass `passenger.anchor` to carry them with their vehicle
+   * (called every frame; feet position and heading in IGI units, `hidden` while the vehicle is not in play, or null to
+   * leave them where they are), or `passive: false` to let them fight. Like every character inside a
+   * ConditionalContainer, they leave play when the container stops.
    */
-  spawn(taskId: number, options?: { passive?: boolean; passenger?: { anchor: () => { position: Vec3; yaw: number } | null } }): AiCharacter | undefined;
+  spawn(taskId: number, options?: { passive?: boolean; passenger?: { anchor: () => { position: Vec3; yaw: number; hidden?: boolean } | null } }): AiCharacter | undefined;
   /** Remove a character from play (as IGI does when its ConditionalContainer stops). */
   despawn(taskId: number): void;
   /** How many guards a GuardGenerator task has spawned so far (its nSpawns). */

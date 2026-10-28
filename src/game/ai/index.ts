@@ -1,6 +1,8 @@
 // The AI system: IGI's soldiers and civilians. At level start every HumanSoldier task outside cutscenes and vehicles
 // becomes a Soldier (soldier.ts) with a GPU-skinned body (body.ts), its HumanAI script and type script (script.ts),
 // its navigation graph (nav.ts, src/formats/graph.ts) and its type's combat settings (common/ai/settings.qvm).
+// Characters in intro and outro cutscenes are actors: they enter play with their cutscene's containers and run their
+// scripts (scripted animations, patrols) without senses, riding the cutscene's vehicles (MissionService.rider).
 // The system turns game events into what soldiers perceive: "noise" and "weapon:fire" (hearing, near misses),
 // "damage"/"death" (hits) and "alarm" (AIEVENT_ALARMON/OFF).
 //
@@ -20,7 +22,7 @@ import { SoldierBody } from "./body.ts";
 import { MountedGun } from "./gun.ts";
 import { aiConfigs, aiLevelData, commonScriptName, DEFAULT_CONFIG, type AiConfig, type AiLevelData, type CharacterSpec } from "./level.ts";
 import { dist, NavGraph } from "./nav.ts";
-import { Soldier, type AiWorld, type WeaponInfo } from "./soldier.ts";
+import { Soldier, type AiWorld, type Seat, type WeaponInfo } from "./soldier.ts";
 
 /**
  * How far soldiers hear a shot: each weapon's "AI Detection Event Range" (DefineWeaponType) names one of two
@@ -57,6 +59,11 @@ export function aiSystem(): GameSystem {
     },
     update(dt) {
       ai?.update(dt);
+    },
+    // After the mission system has run its logic and moved its vehicles: cutscene actors enter and leave play on the
+    // tick their containers start and stop, and passengers sit where their vehicles are this frame.
+    lateUpdate() {
+      ai?.lateUpdate();
     },
     dispose() {
       ai?.dispose();
@@ -126,7 +133,8 @@ class AiSystem implements AiService, AiWorld {
     if (settings) this.configs = aiConfigs(decodeQvm(settings));
     await this.loadWeapons();
 
-    const wanted = this.data.characters.filter((c) => !c.scripted);
+    // Cutscene actors join the pending characters: they enter play while their cutscene's containers run.
+    const wanted = this.data.characters.filter((c) => !c.scripted || (c.cutscene && c.gates.length));
     await Promise.all(wanted.map((c) => this.prepare(c)));
     this.placeGuns();
     // Characters inside ConditionalContainers wait for them to run (checked through the mission system once it is
@@ -281,9 +289,11 @@ class AiSystem implements AiService, AiWorld {
     // Some placements float above the ground (or sink into it): stand them on the floor below them.
     const ground = physics?.groundHeight(spec.position[0], spec.position[1], spec.position[2] + 0.5 * METRE);
     const position: Vec3 = [...spec.position];
-    if (ground !== null && ground !== undefined && spec.position[2] - ground < 8 * METRE) position[2] = ground;
+    // Cutscene actors stand exactly where the cutscene placed them (on train roofs, in helicopter cabins).
+    if (!spec.cutscene && ground !== null && ground !== undefined && spec.position[2] - ground < 8 * METRE) position[2] = ground;
     const config = this.configFor(spec.aiType);
-    const weaponId = spec.weapons.find((w) => !/GRENADE|FLASHBANG|BINOCULAR|MEDIPACK|MINE|KNIFE/.test(w)) ?? defaultWeapon(spec.aiType);
+    // Cutscene actors carry only the guns their tasks give them (Anya at her terminal has none).
+    const weaponId = spec.weapons.find((w) => !/GRENADE|FLASHBANG|BINOCULAR|MEDIPACK|MINE|KNIFE/.test(w)) ?? (spec.cutscene ? null : defaultWeapon(spec.aiType));
     const weapon = weaponId ? this.weaponInfo(weaponId) : null;
     let body: SoldierBody | null = null;
     try {
@@ -300,6 +310,12 @@ class AiSystem implements AiService, AiWorld {
     }
     for (const w of spec.weapons) game.services.weapons?.give(soldier.id, w, this.weaponInfo(w)?.clipSize ?? 1);
     soldier.passive = passive || spec.scripted;
+    if (spec.cutscene) {
+      soldier.actor = true;
+      soldier.invulnerable = true;
+      // Riders of the cutscene's helicopters, trains and trucks keep their seats (the mission system knows the vehicles).
+      soldier.anchor = game.services.mission?.rider?.(spec.aiId) ?? null;
+    }
     this.soldiers.push(soldier);
     soldier.post("AIEVENT_CREATE");
     return soldier;
@@ -330,6 +346,11 @@ class AiSystem implements AiService, AiWorld {
     for (const s of this.soldiers) s.update(dt);
     if (this.debug || this.markers.size) this.drawDebug();
     this.frameTime = performance.now() - start;
+  }
+
+  lateUpdate() {
+    this.syncGated(true);
+    for (const s of this.soldiers) if (s.anchor) s.ride();
   }
 
   // ----------------------------------------------------------------------------------------------- AiWorld
@@ -432,27 +453,8 @@ class AiSystem implements AiService, AiWorld {
    * whose containers stopped (IGI deletes a ConditionalContainer's subtree when it stops; it can come back fresh).
    */
   private spawnPending() {
-    const mission = this.game.services.mission;
-    const test = (expression: string, self?: number) => {
-      if (!mission) return true;
-      try {
-        const v = mission.evaluate(expression, self);
-        return typeof v === "number" ? v !== 0 : v !== "";
-      } catch {
-        return true;
-      }
-    };
-    for (const s of [...this.soldiers]) {
-      // Only characters that entered play with their containers running leave with them (not ones spawned by request).
-      if (!this.gated.has(s) || gatesOpen(s.spec, test)) continue;
-      this.remove(s);
-      if (!s.spec.generator && !this.pending.includes(s.spec)) this.pending.push(s.spec);
-    }
-    this.pending = this.pending.filter((spec) => {
-      if (!gatesOpen(spec, test)) return true;
-      this.gated.add(this.add(spec));
-      return false;
-    });
+    this.syncGated(false);
+    const test = this.tester();
     for (const g of this.generators) {
       const gen = g.spec.generator!;
       if (g.spawned >= gen.maxSpawns || !gatesOpen(g.spec, test) || !test(gen.condition, gen.taskId)) continue;
@@ -468,11 +470,49 @@ class AiSystem implements AiService, AiWorld {
     }
   }
 
+  /** Evaluates mission expressions (true without a mission system or on error). */
+  private tester() {
+    const mission = this.game.services.mission;
+    return (expression: string, self?: number) => {
+      if (!mission) return true;
+      try {
+        const v = mission.evaluate(expression, self);
+        return typeof v === "number" ? v !== 0 : v !== "";
+      } catch {
+        return true;
+      }
+    };
+  }
+
+  /**
+   * Bring gated characters into play whose containers now run and take out those whose containers stopped: the
+   * level's soldiers (polled), or the cutscene actors (every frame, so they appear on the cut that shows them).
+   */
+  private syncGated(cutscene: boolean) {
+    // Without a mission system no container runs a cutscene.
+    if (cutscene && !this.game.services.mission) return;
+    const test = this.tester();
+    for (const s of [...this.soldiers]) {
+      // Only characters that entered play with their containers running leave with them (not ones spawned by request).
+      if (s.spec.cutscene !== cutscene || !this.gated.has(s) || gatesOpen(s.spec, test)) continue;
+      this.remove(s);
+      if (!s.spec.generator && !this.pending.includes(s.spec)) this.pending.push(s.spec);
+    }
+    this.pending = this.pending.filter((spec) => {
+      if (spec.cutscene !== cutscene || !gatesOpen(spec, test)) return true;
+      const s = this.add(spec);
+      this.gated.add(s);
+      // Pose it now: it is drawn this frame.
+      if (cutscene) s.update(0);
+      return false;
+    });
+  }
+
   generatorSpawns(taskId: number) {
     return this.generators.find((g) => g.spec.generator!.taskId === taskId)?.spawned ?? 0;
   }
 
-  spawn(taskId: number, options: { passive?: boolean; passenger?: { anchor: () => { position: Vec3; yaw: number } | null } } = {}) {
+  spawn(taskId: number, options: { passive?: boolean; passenger?: { anchor: () => Seat | null } } = {}) {
     const existing = this.byTask(taskId);
     if (existing) return existing;
     const spec = this.data.characters.find((c) => c.taskId === taskId);

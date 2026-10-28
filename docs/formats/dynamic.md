@@ -122,9 +122,29 @@ rope ladder) are not carried yet.
 
 `Train(Position, Original thrust, RailroadQTaskID, Model, ThrustStep, MaxSpeed, Flip, Displacement X/Y, Play Sound)`.
 A train exists only while its ConditionalContainer runs (Mission 1 has five trains on one track, each for one
-cutscene or gameplay phase); the mission system shows or hides it and runs it while its AnimTask runs. The thrust
-follows the lever (AnimData channel 0, else `Original thrust`) by `ThrustStep` per tick; without thrust a train rolls
-to a stop. Every car is a dynamic collider.
+cutscene or gameplay phase); the mission system shows it, puts it back where the level places it each time its
+container starts, and runs it while its AnimTask runs (or always, without one). Every car is a dynamic collider.
+
+- **Where (confirmed on levels 1 and 10).** `Position` is the front of the locomotive, in world units along the
+  railroad spline from its first waypoint; a negative value counts back from the far end. That is where the level
+  editor left the train: its `Smoke` child sits on the locomotive there (levels 1 and 10), and the cutscene
+  passengers placed with it sit on its cars (Mission 1: Jones lying on the flatcar of the driveby train, crouching on
+  a boxcar roof of the train into the base). Cars trail behind the locomotive, spaced by their models' lengths.
+- **Which way.** `Flip Direction` trains run towards the start of the track (every retail train is flipped).
+- **How fast (inferred).** The thrust lever is a fraction of `MaxSpeed` (km/h): Mission 1's driveby train (0.5,
+  100 km/h) passes the camera that films it in the 3.75 s the shot lasts, and the departing gameplay train (0.2, from
+  1.0 km down the track) leaves the track as its 9 s container ends. A train enters play already moving at
+  `Original thrust`; the thrust follows the lever (AnimData channel 0) by `ThrustStep` per tick, so a lever of 0
+  brings it to a stop.
+
+### Riding along: cutscene passengers and linked cameras
+
+What a cutscene places in or on a vehicle keeps its offset from it: `world = current pose x inverse(level pose) x
+placement` (`src/game/mission/carriers.ts`). A Heli/Car/Plane's level pose is its Position/Orientation; a train car's
+is the car with the train at its `Position`. Riders are characters inside the vehicle task, or whose AI graph is
+(see `ai.md`). An `EditCamera` with a `Link task ID` rides its object the same way, turning, pitching and banking
+with it (the tail cameras and in-cabin closeups of the insertion helicopters, the camera on Jones's flatcar); a
+`Target task ID` naming a train looks at that car.
 
 ## Ladders (confirmed)
 
