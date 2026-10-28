@@ -23,6 +23,7 @@ import type { Entity } from "../entity.ts";
 import type { GameEvents } from "../events.ts";
 import { evaluate, parseExpression, run, truthy, type ScriptEnv, type ScriptValue } from "./script.ts";
 import { pbool, pnum, pstr, pvec, type TaskNode, type TaskTree } from "./tasks.ts";
+import { applyKey, decodeAnimData, newVehicleState, stepVehicle, type VehicleKind, type VehicleSpec, type VehicleState } from "./vehicles.ts";
 
 /** Ticks per second of the logic clock (IGI.exe registers GAME_FREQUENCY = 30). */
 export const GAME_FREQUENCY = 30;
@@ -44,6 +45,24 @@ export interface MissionWorld {
   aiSpawns?(generatorTaskId: number): number;
   /** Text by key (StatusMessage Text, objective texts). */
   text(key: string): string | undefined;
+  /**
+   * Highest surface under (x, y) at or below z (terrain, static models and other moving objects, not the object of
+   * task `ignoreTaskId` itself). Vehicles follow it; optional for Node tests.
+   */
+  ground?(x: number, y: number, z: number, ignoreTaskId?: number): { z: number; normal: Vec3 } | null;
+  /** The world system's train for a Train task id, which the mission's AnimTasks drive. */
+  train?(taskId: number): TrainControl | undefined;
+  /** Model extents for vehicles: length along +Y and depth of the lowest point below the origin (world units). */
+  modelExtent?(model: string): { length: number; bottom: number } | null;
+}
+
+/** What the mission controls of a train (WorldService.train). */
+export interface TrainControl {
+  /** Its task exists (its ConditionalContainer runs): shown, colliding and simulated. */
+  active: boolean;
+  running: boolean;
+  /** Thrust lever (AnimData channel 0), m/s² as the world system reads "Original thrust". */
+  throttle: number;
 }
 
 type Emit = <K extends keyof GameEvents>(type: K, payload: GameEvents[K]) => void;
@@ -273,6 +292,11 @@ export class MissionLogic {
   // ---- ticking
 
   /** Advance logic time by dt seconds (fixed GAME_FREQUENCY ticks). */
+  /** How far the logic clock is into the next tick (0..1), for drawing moving objects between ticks. */
+  get alpha(): number {
+    return Math.min(1, this.accumulator * GAME_FREQUENCY);
+  }
+
   update(dt: number, breakKey = false) {
     if (breakKey) this.breakKey = true;
     this.accumulator = Math.min(this.accumulator + dt, 0.5);
@@ -621,10 +645,26 @@ class LevelTimerTask extends LogicTask {
   }
 }
 
-class AnimTaskTask extends LogicTask {
+/**
+ * Plays back recorded control input for the task named by TargetID (a Car, Heli, Plane or Train): AnimData keys set
+ * input channels at their tick while the AnimTask runs (see vehicles.ts and docs/formats/dynamic.md).
+ */
+export class AnimTaskTask extends LogicTask {
   running = pbool(this.node, "Initial run");
   ticks = 0;
+  readonly target = pnum(this.node, "TargetID", -1);
+  /** Latest value per input channel. */
+  readonly inputs = new Map<number, number>();
+  /** Keys applied since the target last read them (levers need every key, not just the latest). */
+  private fresh: { channel: number; value: number }[] = [];
+  private keys: { tick: number; channel: number; value: number }[];
+  private next = 0;
   private run = this.expr("Run");
+  constructor(node: TaskNode, L: MissionLogic) {
+    super(node, L);
+    const data = node.params["AnimData"];
+    this.keys = Array.isArray(data) ? decodeAnimData(data) : [];
+  }
   field(name: string) {
     if (name === "isRun") return this.running ? 1 : 0;
     if (name === "nTick") return this.ticks;
@@ -632,7 +672,17 @@ class AnimTaskTask extends LogicTask {
   }
   tick() {
     if (this.run) this.running = this.test(this.run);
-    if (this.running) this.ticks++;
+    if (!this.running) return;
+    while (this.next < this.keys.length && this.keys[this.next].tick <= this.ticks) {
+      const k = this.keys[this.next++];
+      this.inputs.set(k.channel, k.value);
+      this.fresh.push(k);
+    }
+    this.ticks++;
+  }
+  /** Keys since the last call. */
+  take(): { channel: number; value: number }[] {
+    return this.fresh.splice(0);
   }
   deactivate() {
     this.running = false;
@@ -839,6 +889,10 @@ export abstract class ObjectTask extends LogicTask implements Explodable {
   }
   worldPosition(): Vec3 {
     return vec3.add(this.position, this.offset);
+  }
+  /** Where the model is drawn and collides: position and Euler angles (doors and vehicles move). */
+  pose(): { position: Vec3; orientation: Vec3 } {
+    return { position: this.worldPosition(), orientation: this.orientation };
   }
   /** World position of the model's centre (where the player aims to use it). */
   centerPosition(): Vec3 {
@@ -1437,6 +1491,109 @@ export class ElevatorTask extends ObjectTask {
   }
 }
 
+/** Health of vehicles, in the player's health-bar units that damage events carry (3 = one full bar). */
+const VEHICLE_HEALTH: Record<VehicleKind, number> = { car: 12, heli: 9, plane: 9 };
+
+/**
+ * Car, Heli and Plane: moved by the AnimTask that targets them (recorded inputs; vehicles.ts), drawn and colliding as
+ * mission objects, destroyed (`isExploded`) by enough damage. Without a running AnimTask their controls are
+ * released: cars roll to a stop, helicopters hold their last collective.
+ */
+export class VehicleTask extends ObjectTask {
+  readonly kind: VehicleKind;
+  state: VehicleState;
+  /** The pose one logic tick ago, for drawing between ticks. */
+  previous: { position: Vec3; orientation: Vec3 };
+  private anim: AnimTaskTask | null | undefined;
+  private spec: VehicleSpec | null = null;
+  private released = new Map<number, number>();
+
+  constructor(node: TaskNode, L: MissionLogic) {
+    super(node, L);
+    this.kind = node.type === "Heli" ? "heli" : node.type === "Plane" ? "plane" : "car";
+    const v = pvec(node, "Speed").map((x) => x * METRE) as Vec3;
+    this.state = newVehicleState(this.position, this.orientation, v, { kind: this.kind, length: 0, bottom: 0, thrust: pnum(node, "Original Thrust") });
+    this.previous = { position: [...this.position], orientation: [...this.orientation] };
+  }
+  get destructible() {
+    return true;
+  }
+  damage(amount: number) {
+    if (this.exploded) return;
+    this.health -= (amount / VEHICLE_HEALTH[this.kind]) * 100;
+    if (this.health <= 0) this.explode();
+  }
+  protected explode() {
+    this.exploded = true;
+    this.L.emit("object:explode", { taskId: this.node.id, position: this.pose().position, radius: 6 * METRE, falloff: 3 * METRE, damage: 100, sound: "", fragments: 6, fireballs: 3 });
+  }
+  pose(): { position: Vec3; orientation: Vec3 } {
+    return { position: this.state.position, orientation: this.state.orientation };
+  }
+  private resolveAnim(): AnimTaskTask | null {
+    if (this.anim !== undefined) return this.anim;
+    const id = this.node.id;
+    this.anim = id < 0 ? null : ((this.L.tasks.find((t) => t instanceof AnimTaskTask && t.target === id) as AnimTaskTask | undefined) ?? null);
+    return this.anim;
+  }
+  tick() {
+    super.tick();
+    this.previous = { position: [...this.state.position], orientation: [...this.state.orientation] };
+    if (this.exploded) return;
+    if (!this.spec) {
+      const ext = this.L.world.modelExtent?.(this.model) ?? { length: 4 * METRE, bottom: 0 };
+      this.spec = { kind: this.kind, length: ext.length, bottom: ext.bottom, thrust: pnum(this.node, "Original Thrust") };
+      if (this.kind === "car") {
+        // Wheels on the ground where the level placed the car.
+        const g = this.L.world.ground?.(this.position[0], this.position[1], this.position[2] + 2 * METRE, this.node.id);
+        if (g) this.state.position[2] = g.z + ext.bottom;
+        this.previous.position = [...this.state.position];
+      }
+    }
+    const anim = this.resolveAnim();
+    let inputs: ReadonlyMap<number, number> = this.released;
+    if (anim?.running) {
+      for (const k of anim.take()) applyKey(this.state, this.kind, k.channel, k.value);
+      inputs = anim.inputs;
+    }
+    const ground = this.L.world.ground;
+    stepVehicle(this.state, this.spec, inputs, 1 / GAME_FREQUENCY, (x, y, z) => ground?.(x, y, z, this.node.id) ?? null);
+  }
+}
+
+/** A Train task: the world system runs it on its railroad; the mission shows it while its container runs and drives it. */
+class TrainTask extends LogicTask {
+  private anim: AnimTaskTask | null | undefined;
+  private throttle = pnum(this.node, "Original thrust");
+  constructor(node: TaskNode, L: MissionLogic) {
+    super(node, L);
+    // Hidden until its container runs.
+    const train = L.world.train?.(node.id);
+    if (train) train.active = false;
+  }
+  field(): ScriptValue | undefined {
+    return undefined;
+  }
+  tick() {
+    const train = this.L.world.train?.(this.node.id);
+    if (!train) return;
+    if (this.anim === undefined) {
+      const id = this.node.id;
+      this.anim = (this.L.tasks.find((t) => t instanceof AnimTaskTask && t.target === id) as AnimTaskTask | undefined) ?? null;
+    }
+    train.active = true;
+    if (this.anim) {
+      train.running = this.anim.running;
+      for (const k of this.anim.take()) if (k.channel === 0 && k.value !== -1) this.throttle = k.value;
+    } else train.running = this.throttle > 0;
+    train.throttle = this.throttle;
+  }
+  deactivate() {
+    const train = this.L.world.train?.(this.node.id);
+    if (train) train.active = false;
+  }
+}
+
 class GuardGeneratorTask extends LogicTask {
   private generate = this.expr("Generate guards");
   isOn = false;
@@ -1482,6 +1639,11 @@ const RUNTIMES: Record<string, Factory> = {
   AlarmLight: (n, L) => new PoweredObjectTask(n, L),
   Elevator: (n, L) => new ElevatorTask(n, L),
   GuardGenerator: (n, L) => new GuardGeneratorTask(n, L),
+  Car: (n, L) => new VehicleTask(n, L),
+  Heli: (n, L) => new VehicleTask(n, L),
+  Plane: (n, L) => new VehicleTask(n, L),
+  // Wagons are Train tasks under their locomotive; only top-level trains run.
+  Train: (n, L) => (n.parent?.type === "Train" ? new EntityTask(n, L) : new TrainTask(n, L)),
 };
 
 /** Run a level's mission.qvm (DefineMission) and return the declared mission number and text keys. */

@@ -11,9 +11,10 @@ export interface WorldService {
   sun: { direction: Vec3; front: [number, number, number]; back: [number, number, number] };
   /**
    * A Train task by id: `running` starts or stops it (trains whose AnimTask condition is "1" start running), `position`
-   * is the locomotive's distance along its railroad in world units.
+   * is the locomotive's distance along its railroad in world units, `active` shows or hides it (the mission system
+   * clears it while the train's ConditionalContainer is not running) and `throttle` is its thrust lever (m/s²).
    */
-  train(taskId: number): { running: boolean; position: number; speed: number } | undefined;
+  train(taskId: number): { active: boolean; running: boolean; throttle: number; position: number; speed: number } | undefined;
   /** Draw-call relevant counts of the static world renderer, for profiling. */
   stats(): Record<string, number>;
 }

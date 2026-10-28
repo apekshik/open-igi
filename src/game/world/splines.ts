@@ -6,13 +6,15 @@
 // (Catmull-Rom) curve through the waypoints. Train tasks run a locomotive and its wagons (child Train tasks) along the
 // SplineObj named by "RailroadQTaskID", at "Position" (distance along the track, world units), accelerating by "Original
 // thrust" up to "MaxSpeed". These rules are our reading of the parameter names and the level data; see
-// docs/formats/world.md.
+// docs/formats/world.md. The mission system drives trains from their AnimTasks (shown while their container runs, the
+// thrust lever from AnimData channel 0; docs/formats/dynamic.md), and every car collides as a dynamic collider.
 
 import * as THREE from "three";
 import type { QvmCall, QvmValue } from "../../formats/qvm.ts";
 import type { ModelLibrary } from "../../render/library.ts";
 import type { StaticRenderer } from "../../render/statics.ts";
 import { METRE } from "../coords.ts";
+import type { DynamicCollider, PhysicsService } from "../physics/api.ts";
 
 interface Spline {
   id: number;
@@ -25,8 +27,12 @@ interface Spline {
 
 export interface TrainState {
   taskId: number;
+  /** The train exists (the mission shows it while its ConditionalContainer runs). Inactive trains are hidden. */
+  active: boolean;
   /** Whether the train runs on its own (its AnimTask condition is "1") or waits for start(). */
   running: boolean;
+  /** Thrust lever, m/s² ("Original thrust", then AnimData channel 0). The actual thrust follows it by ThrustStep. */
+  throttle: number;
   /** Distance of the locomotive along the track, world units. */
   position: number;
   /** World units per second. */
@@ -36,12 +42,17 @@ export interface TrainState {
 interface Train extends TrainState {
   spline: Spline;
   length: number;
-  accel: number;
+  /** Current thrust (m/s²), following the lever by `step` per logic tick. */
+  thrust: number;
+  step: number;
   maxSpeed: number;
   flip: boolean;
   offset: [number, number];
-  cars: { mesh: THREE.Object3D; spacing: number }[];
+  cars: { mesh: THREE.Object3D; spacing: number; model: string; collider: DynamicCollider | null }[];
 }
+
+/** Rolling resistance of a train without thrust, m/s². */
+const TRAIN_FRICTION = 0.4;
 
 const MODEL_NAME = /^\d{3}_\d{2}_\d$/;
 
@@ -88,7 +99,7 @@ export class Splines {
         mesh.matrixAutoUpdate = false;
         mesh.visible = false;
         this.group.add(mesh);
-        cars.push({ mesh, spacing: bb.max.x - bb.min.x });
+        cars.push({ mesh, spacing: bb.max.x - bb.min.x, model, collider: null });
       }
       if (!cars.length) continue;
       const num = (v: QvmValue | undefined, f: number) => (typeof v === "number" ? v : f);
@@ -96,11 +107,14 @@ export class Splines {
         taskId: Number(id),
         spline,
         length: spline.curve.getLength(),
+        active: true,
         running: this.autoRun.has(Number(id)),
         position: num(params[0], 0),
         speed: 0,
         // Thrust as metres per second squared, MaxSpeed as km/h.
-        accel: num(params[1], 0.2) * METRE,
+        throttle: num(params[1], 0.2),
+        thrust: 0,
+        step: num(params[4], 1),
         maxSpeed: (num(params[5], 60) / 3.6) * METRE,
         flip: isTrue(params[6]),
         offset: [num(params[7], 0), num(params[8], 0)],
@@ -115,6 +129,12 @@ export class Splines {
     return this.trains.find((t) => t.taskId === taskId);
   }
 
+  /** Give every train car a dynamic collider (once the physics system exists). */
+  attachColliders(physics: PhysicsService) {
+    if (!physics.addDynamic) return;
+    for (const t of this.trains) for (const car of t.cars) car.collider ??= physics.addDynamic(car.model, car.mesh.matrix.elements);
+  }
+
   update(dt: number) {
     const p = new THREE.Vector3();
     const tangent = new THREE.Vector3();
@@ -122,10 +142,19 @@ export class Splines {
     const up = new THREE.Vector3(0, 0, 1);
     const m = new THREE.Matrix4();
     for (const t of this.trains) {
-      if (t.running) {
-        t.speed = Math.min(t.maxSpeed, t.speed + t.accel * dt);
-        t.position += t.speed * dt;
+      if (!t.active) {
+        for (const car of t.cars) {
+          car.mesh.visible = false;
+          if (car.collider) car.collider.enabled = false;
+        }
+        continue;
       }
+      // The thrust follows the lever by ThrustStep per 30 Hz tick; without thrust the train rolls to a stop.
+      const lever = t.running ? t.throttle : 0;
+      t.thrust += Math.max(-t.step * 30 * dt, Math.min(t.step * 30 * dt, lever - t.thrust));
+      if (t.thrust > 0) t.speed = Math.min(t.maxSpeed, t.speed + t.thrust * METRE * dt);
+      else t.speed = Math.max(0, t.speed - TRAIN_FRICTION * METRE * dt);
+      t.position += t.speed * dt;
       let along = t.position;
       for (const car of t.cars) {
         const s = along - car.spacing / 2;
@@ -134,6 +163,7 @@ export class Splines {
         const d = t.flip ? t.length - s : s;
         if (d < 0 || d > t.length) {
           car.mesh.visible = false;
+          if (car.collider) car.collider.enabled = false;
           continue;
         }
         const u = d / t.length;
@@ -146,6 +176,10 @@ export class Splines {
         m.makeBasis(tangent, left, realUp).setPosition(p);
         car.mesh.matrix.copy(m);
         car.mesh.visible = true;
+        if (car.collider) {
+          car.collider.setMatrix(m.elements);
+          car.collider.enabled = true;
+        }
       }
     }
   }
