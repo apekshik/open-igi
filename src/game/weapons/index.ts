@@ -349,7 +349,7 @@ class Arsenal implements WeaponsService {
     for (let i = 0; i < pellets; i++) {
       const d = jitter(dir, amplitude);
       const to = vec3.add(origin, vec3.scale(d, range));
-      const hit = physics?.raycast(origin, to, { ignoreEntity: ownerId });
+      const hit = physics?.raycast(origin, to, { ignoreEntity: ownerId, bullet: true });
       if (!player && i === 0 && Math.random() < 0.35) this.effects.tracer(vec3.add(origin, vec3.scale(d, 1 * METRE)), hit?.point ?? to);
       if (!hit) continue;
       result.hits.push({ point: hit.point, entityId: hit.entityId, part: hit.part });
@@ -968,7 +968,8 @@ class Arsenal implements WeaponsService {
       t.fn();
     }
     const player = game.services.player;
-    if (player && !player.frozen && !player.dead) this.handleInput(game);
+    // No weapon use while climbing a ladder: both hands are on the rungs.
+    if (player && !player.frozen && !player.dead && player.gait !== "ladder") this.handleInput(game);
     else this.triggerUp = true;
 
     // Sound loops of shooters that stopped firing.

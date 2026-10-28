@@ -1,6 +1,6 @@
 // Surface materials from the game's own tables:
 //   material/material.qvm: SetActiveMaterial(n); DefineQMaterial(transparency, ...); DefineGameMaterial(name,
-//                          ?, ?, ?, passThrough, ...footstep, landing and bullet-impact sounds, decals...)
+//                          stopping, ?, ?, passThrough, ...footstep, landing and bullet-impact sounds, decals...)
 //   terrain/terrain.qvm:   CreateTerrainMaterial(terrainMaterial, gameMaterial, ...per-level texture settings)
 // Collision faces (CMAT) and terrain triangles both resolve to a game material id from material.qvm.
 
@@ -21,6 +21,20 @@ export interface GameMaterial {
    * (HumanCollision, MetalLadder, MetalFence). We treat it as "not a solid surface for bullets" on model faces.
    */
   passThrough: boolean;
+  /**
+   * DefineGameMaterial's first value, read as how well the surface stops bullets: 10 Ground/Gravel/StrongMetal,
+   * 5 Concrete/NormalMetal, 3 SoftMetal, 1 Wood/Carton/Flesh/Plastic, 0 Fence/Glass/Textiles/Rug/Porcelain/Air/Water.
+   */
+  stopping: number;
+}
+
+/**
+ * Do bullets fly through this surface? Rail and chain-link fences and glass do in IGI (Mission 4's sniping from the
+ * water tower is through its railing): they stop nothing and are see-through. Opaque zero-stopping surfaces (rugs,
+ * porcelain, textiles) still take the hit.
+ */
+export function bulletsPass(m: GameMaterial): boolean {
+  return m.passThrough || (m.stopping <= 0 && m.transparency > 0.5);
 }
 
 /** Built-in fallback names (material.qvm order in the retail game) if the script is missing. */
@@ -34,7 +48,7 @@ const isTrue = (v: QvmValue | undefined) => typeof v === "object" && "ident" in 
 const num = (v: QvmValue | undefined) => (typeof v === "number" ? v : 0);
 
 export async function loadGameMaterials(vfs: Vfs): Promise<GameMaterial[]> {
-  const fallback = DEFAULT_NAMES.map((name, id) => ({ id, name, transparency: 0, passThrough: false }));
+  const fallback = DEFAULT_NAMES.map((name, id) => ({ id, name, transparency: 0, passThrough: false, stopping: 10 }));
   if (!vfs.has("material/material.qvm")) return fallback;
   const out: GameMaterial[] = [];
   let active = 0;
@@ -43,7 +57,7 @@ export async function loadGameMaterials(vfs: Vfs): Promise<GameMaterial[]> {
     if (call.fn === "SetActiveMaterial") active = num(call.args[0]);
     else if (call.fn === "DefineQMaterial") transparency = num(call.args[0]);
     else if (call.fn === "DefineGameMaterial") {
-      out[active] = { id: active, name: String(call.args[0]), transparency, passThrough: isTrue(call.args[4]) };
+      out[active] = { id: active, name: String(call.args[0]), transparency, passThrough: isTrue(call.args[4]), stopping: num(call.args[1]) };
       transparency = 0;
     }
   }

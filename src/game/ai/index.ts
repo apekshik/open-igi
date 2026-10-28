@@ -406,7 +406,7 @@ class AiSystem implements AiService, AiWorld {
     // Our own hitscan: first thing along the line within 300 m.
     const physics = game.services.physics;
     const end = vec3.add(origin, vec3.scale(dir, 300 * METRE));
-    const hit = physics?.raycast(origin, end, { ignoreEntity: s.id });
+    const hit = physics?.raycast(origin, end, { ignoreEntity: s.id, bullet: true });
     game.events.emit("weapon:fire", { ownerId: s.id, weapon: w.id, origin, direction: dir, silenced: w.silenced });
     game.events.emit("noise", { position: origin, radius: w.silenced ? SILENCED_RANGE : GUNSHOT_RANGE, sourceId: s.id, kind: "gunshot" });
     if (w.fireSound && Math.random() < 0.5) this.sound(w.fireSound, origin, 0.8);

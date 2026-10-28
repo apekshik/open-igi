@@ -11,7 +11,7 @@ import { decodeCollision, type ModelCollision } from "../../formats/collision.ts
 import type { DynamicCollider, GroundHit, MoveOptions, MoveResult, PhysicsService, RayHit, RaycastOptions } from "./api.ts";
 import { gatesOpen } from "../mission/gates.ts";
 import { buildCollisionWorld, placementMatrix, type PlacedModel } from "./load.ts";
-import { loadMagicObjTypes } from "./materials.ts";
+import { bulletsPass, loadMagicObjTypes } from "./materials.ts";
 import { toLocal, toWorld, type CollisionWorld, type DynamicBody, type GroundInfo } from "./world.ts";
 
 export function physicsSystem(): GameSystem {
@@ -119,6 +119,9 @@ export class IgiPhysics implements PhysicsService {
       part: this.world.materialName(w.material),
       model: w.object >= 0 ? this.world.objects[w.object].model : undefined,
     };
+    // Bullets fly on through fences and glass.
+    const info = w && options?.bullet ? this.world.materials[w.material] : undefined;
+    if (w && info && bulletsPass(info)) return this.raycastPast(from, to, w.distance, options);
     if (best?.model && this.ladders.has(best.model)) best.ladder = true;
     if (best && w && w.body >= 0) {
       const body = this.colliders.get(w.body);
