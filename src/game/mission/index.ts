@@ -11,6 +11,8 @@ import { briefingLines, loadStrings, missionInfo } from "./text.ts";
 
 /** Seconds after the player dies before the mission fails, if the level's own scripts have not ended it. */
 const DEATH_FAIL_DELAY = 4;
+/** Seconds for a pressed alarm pad to reach AlarmControl.isAlarm (trigger, then the EditVariable latch). */
+const ALARM_CHECK_DELAY = 0.5;
 
 export function missionSystem(): GameSystem {
   let logic: MissionLogic;
@@ -21,6 +23,8 @@ export function missionSystem(): GameSystem {
   let useLatched = false;
   let wasCutscene: CutSceneTask | null = null;
   let deathTimer = -1;
+  /** Seconds until we check that an alarm pad pressed for an AI soldier really set the level's alarm off. */
+  let alarmCheck = -1;
   const cleanup: (() => void)[] = [];
 
   return {
@@ -105,7 +109,9 @@ export function missionSystem(): GameSystem {
         game.events.on("alarm", (a) => {
           if (logic.emittingAlarm || !a.active || logic.alarm()) return;
           const src = a.sourceId === null ? undefined : game.entities.get(a.sourceId);
-          logic.raiseAlarm(src?.position ?? null);
+          // If the level's alarm does not follow (its AlarmControl is switched off, e.g. level9 once the security
+          // terminal is hacked), tell everyone it is off again, or the AI and siren stay in alarm forever.
+          if (logic.raiseAlarm(src?.position ?? null)) alarmCheck = ALARM_CHECK_DELAY;
         }),
       );
       cleanup.push(
@@ -135,6 +141,7 @@ export function missionSystem(): GameSystem {
           target ? { text: target.useText(), progress: hold && hold.task === target ? hold.time / target.holdTime() : 0, taskId: target.node.id } : null,
         text: (key) => strings.get(key),
         evaluate: (src, self) => logic.evaluateSource(src, self),
+        assign: (name, value) => logic.setVariable(name, value),
         use: (_entityId, taskId) => {
           const t = logic.tasks.find((x) => x.node.id === taskId && x.active);
           if (!t || !isUsable(t) || !t.canUse()) return false;
@@ -190,6 +197,8 @@ export function missionSystem(): GameSystem {
 
       const breakKey = !!logic.cutscene() && (input.wasPressed("jump") || input.wasPressed("fire") || input.wasPressed("use"));
       logic.update(dt, breakKey);
+
+      if (alarmCheck >= 0 && (alarmCheck -= dt) <= 0 && !logic.alarm()) logic.reportAlarm();
 
       if (deathTimer >= 0 && (deathTimer -= dt) <= 0 && !logic.ended) logic.end(false, "killed");
 

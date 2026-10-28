@@ -121,7 +121,7 @@ export function isUsable(t: LogicTask): t is LogicTask & Usable {
 
 /** Shared state for tasks that can be shot or blown up (the ExplodeObject parameter block). */
 export interface Explodable {
-  /** Applied damage (after Damage scale). Destroyed at 100. */
+  /** Applied damage in IGI damage units; destroyed once it exceeds the object's "Damage scale". */
   damage(amount: number): void;
   readonly exploded: boolean;
 }
@@ -227,6 +227,13 @@ export class MissionLogic {
    * A task variable by its script name ("CutScene_1200.nTick", "EditVariable_4004.nValue"), or undefined when no task
    * of that name has the field. The audio system resolves ConditionalSound conditions through this.
    */
+  /** Write a task variable from an AI script ("EditVariable_173.nValue"); only EditVariable values are writable. */
+  setVariable(name: string, value: number) {
+    const dot = name.lastIndexOf(".");
+    const task = dot < 0 ? undefined : this.byKey.get(name.slice(0, dot));
+    if (task instanceof EditVariableTask) task.setField(name.slice(dot + 1), value);
+  }
+
   variable(name: string): number | undefined {
     const dot = name.lastIndexOf(".");
     if (dot < 0) {
@@ -435,12 +442,17 @@ export class MissionLogic {
     for (const t of this.tasks) if (t instanceof AlarmControlTask && t.active && t.isAlarm) on = true;
     if (on !== this.alarmOn) {
       this.alarmOn = on;
-      this.emittingAlarm = true;
-      try {
-        this.emit("alarm", { active: on, sourceId: null });
-      } finally {
-        this.emittingAlarm = false;
-      }
+      this.reportAlarm();
+    }
+  }
+
+  /** Emit the level's alarm state (also to correct listeners that heard an alarm the level did not raise). */
+  reportAlarm() {
+    this.emittingAlarm = true;
+    try {
+      this.emit("alarm", { active: this.alarmOn, sourceId: null });
+    } finally {
+      this.emittingAlarm = false;
     }
   }
 
@@ -581,6 +593,9 @@ class EditVariableTask extends LogicTask {
   field(name: string) {
     if (name === "nValue") return this.value;
     return undefined;
+  }
+  setField(name: string, value: number) {
+    if (name === "nValue") this.value = value;
   }
   tick() {
     // Both are evaluated against the value at the start of the tick.
@@ -884,7 +899,12 @@ export abstract class ObjectTask extends LogicTask implements Explodable {
   offset: Vec3 = [0, 0, 0];
   /** Centre of the model in its own frame (set by the renderer from the model bounds). Origins are often an edge. */
   center: Vec3 = [0, 0, 0];
-  health = 100;
+  /**
+   * Damage left before it blows, in IGI damage units (a weapon's Damage Factor; an AI soldier dies at 1.0). The
+   * level's "Damage scale" is this toughness, not a multiplier: computers and barrels have 1 (a few rifle rounds),
+   * level6's large fuel tanks 100 and level8's SAM launcher 99 (only their scripted C4 / airstrike destroys them).
+   */
+  health = pnum(this.node, "Damage scale", 1);
   exploded = false;
   /** Seconds left until a triggered explosion goes off. */
   private fuse = -1;
@@ -918,7 +938,7 @@ export abstract class ObjectTask extends LogicTask implements Explodable {
   }
   damage(amount: number) {
     if (this.exploded || this.fuse >= 0 || !this.destructible || !this.physical) return;
-    this.health -= amount * (pnum(this.node, "Damage scale", 1) || 1);
+    this.health -= amount;
     if (this.health <= 0) this.trigger();
   }
   /** Start the explosion (after Explosion delay). */

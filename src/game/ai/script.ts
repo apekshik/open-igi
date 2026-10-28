@@ -22,7 +22,12 @@ const CONSTANTS: Record<string, ScriptValue> = {
 };
 
 /** Run a script's body. Identifiers that are not natives or constants evaluate to their own name (AIEVENT_*, ...). */
-export function runScript(script: QvmScript, natives: ScriptNatives, variable?: (name: string) => ScriptValue) {
+export function runScript(
+  script: QvmScript,
+  natives: ScriptNatives,
+  variable?: (name: string) => ScriptValue,
+  assign?: (name: string, value: ScriptValue) => void,
+) {
   const value = (v: QvmValue): ScriptValue => {
     if (typeof v === "number" || typeof v === "string") return v;
     if ("ident" in v) {
@@ -43,7 +48,13 @@ export function runScript(script: QvmScript, natives: ScriptNatives, variable?: 
     // Short-circuit the logical operators, as the bytecode does.
     if (v.binary === "&&") return Number(truthy(value(v.left)) && truthy(value(v.right)));
     if (v.binary === "||") return Number(truthy(value(v.left)) || truthy(value(v.right)));
-    if (v.binary === "=") return value(v.right);
+    if (v.binary === "=") {
+      // Level scripts also write mission variables: level10's Priboi sets `EditVariable_173.nValue = 2` after taking
+      // patrol path 619, so that his next IDLE moves on to the next path.
+      const r = value(v.right);
+      if (typeof v.left === "object" && "ident" in v.left) assign?.(v.left.ident, r);
+      return r;
+    }
     const a = value(v.left), b = value(v.right);
     if (v.binary === "==") return Number(a === b);
     if (v.binary === "!=") return Number(a !== b);
