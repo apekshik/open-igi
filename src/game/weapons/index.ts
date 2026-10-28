@@ -443,11 +443,13 @@ class Arsenal implements WeaponsService {
       return;
     }
     for (const e of this.game.entities.all()) {
-      if (!e.alive || e.kind === "pickup" || e.radius <= 0) continue;
+      // Entities without a capsule (radius 0) are hit through their dynamic collider (vehicles, doors).
+      if (!e.alive || e.kind === "pickup" || (e.radius <= 0 && e.height <= 0)) continue;
       const centre: Vec3 = [e.position[0], e.position[1], e.position[2] + e.height * 0.5];
       const d = vec3.distance(centre, position);
       if (d > radius) continue;
-      if (physics && !physics.lineOfSight(lifted, centre)) continue;
+      // Cover blocks the blast; an object's own collider (a tank's hull around its centre) does not.
+      if (physics && !physics.lineOfSight(lifted, centre) && physics.raycast(lifted, centre)?.entityId !== e.id) continue;
       const f = Math.min(1, (radius - d) / Math.max(falloff, 0.01 * METRE));
       this.applyFactor(e.id, damage * f, sourceId, centre, vec3.normalize(vec3.sub(centre, position)), "torso");
     }

@@ -70,10 +70,28 @@ The AnimTask runs while its `Run` expression holds; keys play back on its own ti
 
 We do not run IGI's vehicle physics (most `DefinePhysicsObjType` parameters are undecoded). `vehicles.ts` replays the
 inputs through simple models: cars follow the ground with bicycle steering (throttle lever × top speed); helicopters
-tilt their rotor thrust (collective × g along the body's up axis, drag); planes fly along the nose. The car constants
-were fitted so Mission 7's truck (`Car_351`, 233 s of input) passes its four `CRITERIA_VEHICLE` areas (hamlet, front
-gate, "Game complete", rear gate) in order; because replayed input drifts, a car also turns gently onto a
-`CRITERIA_VEHICLE` area within 80 m ahead of it. Helicopter and plane paths are plausible, not exact.
+tilt their rotor thrust (collective × g along the body's up axis, drag); planes fly along the nose. Helicopter and plane
+paths are plausible, not exact.
+
+**Mission 7's border truck** (`Car_351`, 233 s of input) is what the car model is fitted to, with the level script's
+gating as the game runs it (`AnimTask_300.Run`):
+
+1. The AnimTask pauses at `LevelTimer_2500` tick 2650 (88 s): the recorded drive brakes there, in the hamlet strip
+   (`AreaActivate_169`, 8 × 40 m across the road).
+2. `LevelTimer_2504` runs while a vehicle is in that strip; at 10 s it sets `EditVariable_2003` and the drive resumes.
+3. It brakes for the front gate (`AreaActivate_166` opens it), and stops in "Game complete" (`AreaActivate_177`)
+   exactly when the AnimTask pauses for good at tick 4330 (`EditVariable_2010` is never set).
+4. Jones in the bed (`AreaActivate_173`) + the truck in 177 start the outro.
+
+Replayed input drifts, so three corrections keep a scripted car on its script, all in `vehicles.ts`/`VehicleTask`:
+the nearest vehicle area not yet visited slowly turns the car towards it (0.03 rad/s within 990 m) and, within 68 m,
+shifts it sideways onto its line (2.3 m/s, heading unchanged); a car whose AnimTask is paused rolls on (or backs up) at
+2.5 m/s into a vehicle area within 60 m and stops inside. The constants were fitted offline with that gating and hold
+with each varied by 10-15 %; in the game the mission completes (truck, Jones in the bed, outro, "complete").
+
+Scripted vehicles keep their last `CRITERIA_VEHICLE` answer while their task does not exist (as the player does): the
+outro's own start takes the truck's container (`ConditionalContainer_559`, "!CutScene_1200.isRun") down, and dropping
+the count stopped the outro again at once.
 
 ### CarAI
 
@@ -84,8 +102,10 @@ gate, "Game complete", rear gate) in order; because replayed input drifts, a car
 ### Destruction
 
 Scripts test `Car_N.isExploded` (Mission 1 fails if the truck to steal is destroyed; Mission 10's Huey appears once the
-tank is). Vehicles take damage from bullets and blasts (cars 12 health-bar units, aircraft 9; our choice) and explode
-with a 6 m blast.
+tank is). Vehicles take full damage from blasts and 2 % from bullets (cars 12 health-bar units, aircraft 9; our
+choice; Mission 7's hamlet guards shoot at the truck and the level fails if it explodes), and explode with a 6 m blast.
+Blasts reach entities without a capsule through their own collider (one RPG-18 rocket destroys Mission 10's T80, which
+brings in the Huey; its AnimTask then sets Priboi's path trigger at 74 s).
 
 ### Drawing
 

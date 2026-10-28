@@ -91,8 +91,11 @@ export function stepVehicle(s: VehicleState, spec: VehicleSpec, inputs: Inputs, 
 
 /** Throttle 1 = this speed; the recorded levers are mostly 0.125 .. 0.5. */
 /** Car model constants (exported so tools can fit them against the levels' arrival areas). */
-// Fitted so the Mission 7 truck (Car_351, 233 s of recorded input) passes its four CRITERIA_VEHICLE areas in order.
-export const CAR_TUNING = { maxSpeed: 18.5 * METRE, accel: 6.5 * METRE, brake: 8 * METRE, maxSteer: 0.79, steerRate: 1.71, wheelbase: 0.6 };
+// Fitted against Mission 7's level script with the AnimTask gating as the game runs it (Car_351, 233 s of input): the
+// truck must stop in the hamlet strip (AreaActivate_169) when its AnimTask pauses at LevelTimer_2500 tick 2650, wait
+// 10 s, then pass the front gate, "Game complete" and rear gate areas before tick 4330. Holds with every constant
+// varied by 10-15 %.
+export const CAR_TUNING = { maxSpeed: 12.57 * METRE, accel: 3.35 * METRE, brake: 8 * METRE, maxSteer: 0.88, steerRate: 0.82, wheelbase: 0.6 };
 
 function stepCar(s: VehicleState, spec: VehicleSpec, inputs: Inputs, dt: number, ground: GroundQuery) {
   // Front wheels turn towards the steering input.
@@ -259,41 +262,59 @@ export function decodeAnimData(data: readonly number[]): { tick: number; channel
   return keys;
 }
 
-/** How far ahead (world units) and how sharply off the nose a vehicle area still guides a car, and how hard. */
-const GUIDE_RANGE = 80 * METRE;
-const GUIDE_CONE = 1.0;
-const GUIDE_RATE = 0.6;
+/**
+ * How far ahead (world units) and how far off the nose (radians) a vehicle area still guides a car, and how fast the car
+ * is shifted sideways onto it (world units per second).
+ */
+export const GUIDE = { range: 68 * METRE, cone: 1.2, rate: 2.33 * METRE, far: 990 * METRE, pull: 0.03 };
 
 /**
  * Recorded inputs replayed through our approximate car model drift by metres over a long drive, while level scripts
- * need the car inside their CRITERIA_VEHICLE areas (Mission 7's border-crossing truck opens the gates and ends the
- * mission by entering them). A car moving towards such an area turns gently onto it. `targets` are area centres.
+ * need the car inside their CRITERIA_VEHICLE areas (Mission 7's border-crossing truck must wait 10 s in the hamlet strip,
+ * then open the gates and end the mission by entering them). A car heading for such an area is shifted sideways onto the
+ * line through it, a little each tick, without turning: the heading, and so the rest of the recorded drive, is kept.
+ * `targets` are the centres of the areas the car has not been in yet; the nearest is taken as the next.
  */
 export function guideCar(s: VehicleState, targets: readonly Vec3[], dt: number) {
   if (s.speed <= METRE) return;
   const heading = s.orientation[2];
-  let best: { d: number; turn: number } | null = null;
+  const fx = -Math.sin(heading);
+  const fy = Math.cos(heading);
+  let best: { d: number; side: number; turn: number } | null = null;
   for (const t of targets) {
     const dx = t[0] - s.position[0];
     const dy = t[1] - s.position[1];
     const d = Math.hypot(dx, dy);
-    if (d > GUIDE_RANGE || d < METRE) continue;
+    if (d > GUIDE.far || d < METRE) continue;
     const turn = wrap(Math.atan2(-dx, dy) - heading);
-    if (Math.abs(turn) > GUIDE_CONE) continue;
-    if (!best || d < best.d) best = { d, turn };
+    if (!best || d < best.d) best = { d, side: dx * fy - dy * fx, turn };
   }
-  if (best) s.orientation[2] = heading + clamp(best.turn, -GUIDE_RATE * dt, GUIDE_RATE * dt);
+  // The nearest area not yet visited is the next one on the way; it guides only while roughly ahead.
+  if (!best || Math.abs(best.turn) > GUIDE.cone) return;
+  // Far out, a slow turn takes out the heading the replay has drifted by; close in, a sideways shift lines it up.
+  s.orientation[2] = heading + clamp(best.turn, -GUIDE.pull * dt, GUIDE.pull * dt);
+  if (best.d > GUIDE.range) return;
+  // Right of the heading is (fy, -fx); `side` is how far the area's centre lies to that side.
+  const shift = clamp(best.side, -GUIDE.rate * dt, GUIDE.rate * dt);
+  s.position = [s.position[0] + fy * shift, s.position[1] - fx * shift, s.position[2]];
 }
 
 /**
  * Drive a car towards `target` at `speed` (units/s) by setting its steering input and throttle lever, as a CarAI
- * driver does along its PatrolPath (null target: brake to a stop).
+ * driver does along its PatrolPath (null target: brake to a stop; `reverse`: back straight up towards it).
  */
-export function autopilot(s: VehicleState, target: Vec3 | null, speed: number, inputs: Map<number, number>) {
+export function autopilot(s: VehicleState, target: Vec3 | null, speed: number, inputs: Map<number, number>, reverse = false) {
   if (!target) {
     inputs.set(CAR.steer, 0);
     s.levers.set(CAR.throttle, 0);
     s.levers.set(CAR.brake, 1);
+    return;
+  }
+  if (reverse) {
+    // Straight back (the target lies behind).
+    inputs.set(CAR.steer, 0);
+    s.levers.set(CAR.throttle, -speed / CAR_TUNING.maxSpeed);
+    s.levers.set(CAR.brake, 0);
     return;
   }
   const want = Math.atan2(-(target[0] - s.position[0]), target[1] - s.position[1]);

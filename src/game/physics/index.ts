@@ -260,6 +260,9 @@ export class IgiPhysics implements PhysicsService {
           carried++;
         } else {
           if (this.riding.get(e) === body) this.riding.delete(e);
+          // Someone riding another collider moves with that one: a gate opening as the truck rolls through must not
+          // shove Jones off the truck bed (riders already ignore other colliders when they move).
+          if (this.riding.has(e)) continue;
           const push = this.world.pushOut(body, p, e.radius, e.height, [b[0] + gx - p[0], b[1] + gy - p[1]]);
           if (push) {
             e.position = [p[0] + push[0], p[1] + push[1], p[2]];
