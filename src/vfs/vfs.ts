@@ -46,3 +46,13 @@ export async function vfsFromDevServer(): Promise<Vfs | null> {
     },
   };
 }
+
+/** Backed by the persistent store written by import.ts: each file is read from storage on demand. */
+export function vfsFromStore(store: { get(path: string): Promise<Uint8Array> }, paths: string[]): Vfs {
+  const set = new Set(paths.map(norm));
+  return {
+    has: (p) => set.has(norm(p)),
+    list: () => [...set],
+    read: (p) => store.get(norm(p)),
+  };
+}

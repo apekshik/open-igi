@@ -25,12 +25,19 @@ levels, then walking around Mission 1 on foot.
 
 ## Running
 
+**In the browser:** https://apekshik.github.io/open-igi/ . open-igi hosts no game data, so on first visit it asks for
+your own copy: choose or drop the install folder (the one that contains `missions` and `common`, usually `PC`), a
+`.zip` of it, or a game `.iso`. The files are validated and stored in your browser (never uploaded); later visits start
+straight into the game, and "Forget game data" on the landing page removes them. See [docs/DEPLOY.md](docs/DEPLOY.md).
+
+**From source:**
+
 ```bash
 npm install
 npm run dev
 ```
 
-Point the page at your IGI install folder when it asks. Nothing is uploaded; files stay in your browser.
+Import your game on the page the same way, or set `IGI_DATA=C:/path/to/PC` in `.env.local` to mount a folder directly.
 
 ## Research tools
 
