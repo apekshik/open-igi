@@ -239,6 +239,12 @@ class Hud {
     const H = this.canvas.height / s;
     ctx.setTransform(s, 0, 0, s, 0, 0);
 
+    // Scripted cutscenes (intro/outro): Jones is not in control, so only the subtitles show.
+    if (game.services.mission?.cutscene()) {
+      this.drawMessages(W, H);
+      return;
+    }
+
     this.hurt = Math.max(0, this.hurt - dt * 0.8);
     const player = game.services.player;
     if (player) {
