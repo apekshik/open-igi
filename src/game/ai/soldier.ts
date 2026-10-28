@@ -253,18 +253,26 @@ export class Soldier implements AiCharacter {
     const common = this.world.commonScript(this.aiType);
     const natives = this.natives(queued, common);
     if (level) runScript(level, natives);
-    else if (common) runScript(common, natives);
     else natives.AIFunction_DefaultHandler();
   }
 
   /** The engine side of the scripts: AIFunction_* queries/settings and AIAction_* actions. */
   private natives(queued: Action[], common: QvmScript | null): ScriptNatives {
     const n = (v: ScriptValue | undefined) => (typeof v === "number" ? v : 0);
+    // A DefaultHandler call from inside the common script means the engine's built-in handling, not the common
+    // script again (that recursed until the stack overflowed).
+    let inCommon = false;
     const natives: ScriptNatives = {
       AIFunction_GetCurrentEventType: () => this.event,
       AIFunction_DefaultHandler: () => {
-        if (common) runScript(common, natives);
-        else if (this.event === "AIEVENT_IDLE") queued.push(idle(2));
+        if (common && !inCommon) {
+          inCommon = true;
+          try {
+            runScript(common, natives);
+          } finally {
+            inCommon = false;
+          }
+        } else if (this.event === "AIEVENT_IDLE") queued.push(idle(2));
         else if (this.event === "AIEVENT_DEAD") queued.push(dead());
         else if (/ENEMYDETECTION|GUNSHOT|TAKINGDAMAGE|ALERT/.test(this.event)) this.pendingCombat = true;
         else if (this.event === "AIEVENT_COMBAT") queued.push(combat());
@@ -338,7 +346,9 @@ export class Soldier implements AiCharacter {
   shout() {
     if (!this.lastKnown) return;
     for (const other of this.world.characters()) {
-      if (other === this || !other.alive || other.team !== this.team) continue;
+      // Skip anyone already handling an alert: two soldiers whose scripts answer an alert with SendResponse would
+      // otherwise shout at each other until the stack overflows.
+      if (other === this || !other.alive || other.team !== this.team || other.event === "AIEVENT_ALERT") continue;
       const d = dist(other.position, this.position);
       if (d < 15 * METRE || (d < 35 * METRE && this.game.services.physics?.lineOfSight(this.eye(), other.eye()))) {
         other.lastKnown ??= [...this.lastKnown];
