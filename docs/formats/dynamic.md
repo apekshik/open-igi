@@ -63,7 +63,7 @@ match the cutscenes that run them); any other channel sets an input. 1,060 keys 
 | Car | 1 | 0..0.5, -0.25, -1 | throttle lever: set, then -1 a tick later ("key released", keep the value) |
 | Car | 3 | 1, -1 | brake (pressed, released) |
 | Car | 4 | -1 | unknown (released at start) |
-| Heli | 0, 1, 2 | -1, 0, 1 | cyclic fore/aft, cyclic lateral, pedals (axes; mapping inferred) |
+| Heli | 0, 1, 2 | -1, 0, 1 | cyclic fore/aft (-1 nose down), cyclic lateral (+1 bank right), pedals (+1 turn right); fitted, see below |
 | Heli | 3 | 0.84..1.2, -1 | collective lever (1 ≈ hover; `Original Thrust` is its start value) |
 | Plane | 0, 1, 2 | -1, 0, 1 | stick and rudder axes |
 | Plane | 3 | 0.8..1.25, -1 | throttle lever; 5..9 gear, canopy and similar switches |
@@ -76,6 +76,34 @@ We do not run IGI's vehicle physics (most `DefinePhysicsObjType` parameters are 
 inputs through simple models: cars follow the ground with bicycle steering (throttle lever × top speed); helicopters
 tilt their rotor thrust (collective × g along the body's up axis, drag); planes fly along the nose. Helicopter and plane
 paths are plausible, not exact.
+
+### Helicopters (inferred, fitted)
+
+The recordings are mostly short taps (2-6 ticks) that the pilot corrects with opposite taps, and long flights end
+with the summed cyclic input far from zero, so the cyclic and pedals are **rate commands**: the tilt or heading changes
+while a key is held and stays when it is released. The signs come from the flights: Mission 10's roof helicopter
+(`Heli_707`) takes off at collective 1.2 and noses down on channel 0 = -1; Mission 1 and 3's intro helicopters start
+nose-down and fly forward. The rates and the rest of `HELI_TUNING` were fitted offline against where the scripts and
+cutscene cameras need the flights:
+
+- **Mission 10's Huey** (`Heli_851`, 81.5 s) must carry Priboi off the main building's roof (`AreaActivate_159`; the
+  outro's `Heli_707` sits there): 501 m from where it lifts off a hillside, 57 m lower. It starts on the ground at
+  collective 1.4 and skims the hill at 1.04 before descending at 0.96, which only works with some ground effect.
+- **Mission 1's insertion flight** (`Heli_1502`) must pass the "Heli flyby" camera of CutScene 1200 at 16-18.6 s, and
+  **Mission 3's** (`Heli_602`) the "Helicopter flyby" camera of CutScene 701 at 11.9-15.1 s (650 m and 440 m away).
+- **Mission 3's landing** (`Heli_603`, CutScene 702) sinks at collective 0.92 and must stay down when the pilot sets
+  1.04 while Jones jumps out (`liftOff`).
+
+Result (in the game): the Huey flies 494 m in 80 s and stops 14-22 m from the roof spot, 12-18 m above it (before:
+it sank back onto the hillside or drifted ~50 m); the Mission 1 flyby passes 175 m from its camera (before ~430 m,
+pitched up 50°); Mission 3's helicopter touches down at 9.2 s of the 9 s landing shot. The two intro flights hold
+collective 1.5 throughout and still climb (capped at 4 m/s): IGI's own lift must fall off at speed in a way we do not
+model. A helicopter whose AnimTask is not playing (not started, paused or played out) holds a hover where it is, or
+stays on the ground; its rotors (`ROTOR` parts) stay out of its height and collision.
+
+A rotor hub's ATTA rotation read like every other attachment's stands the Huey's main rotor on its side (mast
+pointing back, blades vertical); its transpose puts the mast down and the blades level, so spinning hubs use the
+transpose and spin about the local axis along the vehicle's up (main) or side (tail) axis.
 
 **Mission 7's border truck** (`Car_351`, 233 s of input) is what the car model is fitted to, with the level script's
 gating as the game runs it (`AnimTask_300.Run`):
@@ -117,6 +145,10 @@ Vehicles draw their model with its `ATTA` attachments (wheels, rotors, doors). `
 (`DefineMagicObj(model, model, TASKTYPE_*)`): `ROTOR` (711_01_1, 711_02_1, 712_01_1, 700_02_1, 700_03_1, 700_04_1)
 spin, `WHEEL`/`HELIWHEEL` are the wheels. The `HumanSoldier` and `EditRigidObj` children of vehicles (passengers, a
 rope ladder) are not carried yet.
+
+Every attached part except spinning rotors is also a dynamic collider at its pose under the vehicle, reporting the
+vehicle's entity: the T80's own collision set stops at 0.8 m above its origin, so a rocket aimed at its turret
+(`614_02_1`, 0.7-2.7 m) flew through until the turret collided too (it now destroys the tank like a hull hit).
 
 ## Trains
 

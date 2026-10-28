@@ -24,8 +24,13 @@ belong to cutscenes and vehicles. Cutscene characters are actors that enter play
 passengers outside cutscenes are only spawned on request (`AiService.spawn`). The rest wait for every
 enclosing `ConditionalContainer` to run (`ConditionalContainer_<id>.isRun`, asked through the mission system): level
 1's guards live in "Main character and status messages", which runs once the intro cutscene is over. A `HumanSoldier`
-under a `GuardGenerator` ("Generate guards" condition, "Max spawns") is a template: copies spawn while the condition
-holds, one at a time, up to the maximum (`AiService.generatorSpawns` reports the count).
+under a `GuardGenerator` ("Generate guards" condition, "Max spawns"; those are its only two parameters in every level's
+`Task_DeclareParameters`) is a template: it keeps one guard in play, spawning the next copy only once the last is dead
+(or gone with its container) while the condition holds, up to the maximum (`AiService.generatorSpawns` reports the
+count, the scripts' `nSpawns`). The levels rely on it: Mission 10's T80 comes at `GuardGenerator_70x.nSpawns == 2`,
+i.e. once a street trooper was killed and replaced, and Mission 6's generators refill a building out of the player's
+sight (`!AreaActivate.nActive && Door.isClosed`) instead of growing it (29 soldiers under alarm stayed 29; it reached
+53 when a copy came every 8 s).
 
 ## PatrolPathCommand ids
 
