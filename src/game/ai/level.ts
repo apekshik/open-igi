@@ -8,6 +8,8 @@
 //   PatrolPath    no parameters; children PatrolPathCommand(Command, Command Parameter), see patrol.ts
 //   AIGraph       Graph position (xyz), ...
 //   AlarmControl  Position (xyz), Orientation (9), Model, ...
+//   StationaryGun Position (xyz), Orientation (stored as 3 angles; the third is the heading), Holder model, Weapon ID,
+//                 Max up angle, Max down angle, Max sideways angle (degrees), Ammo (-1 = unlimited)
 import type { QvmCall, QvmValue } from "../../formats/qvm.ts";
 import type { Vec3 } from "../coords.ts";
 
@@ -37,8 +39,10 @@ export interface CharacterSpec {
   weapons: string[];
   /** PatrolPath task id → commands. */
   patrols: Map<number, PatrolCommand[]>;
-  /** Placed inside a cutscene or vehicle (spawned only on request). */
+  /** Placed inside a cutscene or vehicle (not spawned with the level's soldiers). */
   scripted: boolean;
+  /** The vehicle task type it rides in ("Heli", "Car", "Train", "AnimTask"), if any. */
+  vehicle?: string;
   /**
    * Ids of the ConditionalContainer tasks around it: in IGI a container's subtree only exists while it runs, so
    * the character enters play when all of them run (e.g. level 1's guards once the intro cutscene ends).
@@ -56,6 +60,23 @@ export interface AiLevelData {
   alarms: Map<number, Vec3>;
   /** Every task's position by id (for scripts that refer to tasks: Activate, FireAtTask). */
   taskPositions: Map<number, Vec3>;
+  /** StationaryGun tasks by id (mounted machine guns that gunners man: AIFunction_SetGunnerID). */
+  guns: Map<number, StationaryGunSpec>;
+}
+
+export interface StationaryGunSpec {
+  taskId: number;
+  position: Vec3;
+  /** Heading of the gun's rest direction (radians about Z). */
+  yaw: number;
+  holderModel: string;
+  weapon: string;
+  /** Traverse limits in degrees: up, down (negative) and sideways either side of the rest direction. */
+  maxUp: number;
+  maxDown: number;
+  maxSide: number;
+  /** Rounds, or -1 for unlimited. */
+  ammo: number;
 }
 
 // Characters inside these are part of cutscenes or ride vehicles; the mission system drives those.
@@ -69,10 +90,11 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
   const graphs = new Map<number, Vec3>();
   const alarms = new Map<number, Vec3>();
   const taskPositions = new Map<number, Vec3>();
+  const guns = new Map<number, StationaryGunSpec>();
   // Patrol paths outside any soldier (level4 keeps its friendly team's routes in a shared "Patrol Paths" container).
   const sharedPatrols = new Map<number, PatrolCommand[]>();
 
-  function visit(task: QvmCall, scripted: boolean, gates: number[], generator?: CharacterSpec["generator"]) {
+  function visit(task: QvmCall, scripted: boolean, gates: number[], generator?: CharacterSpec["generator"], vehicle?: string) {
     if (task.fn !== "Task_New") return;
     const [id, type, name, ...rest] = task.args;
     const t = String(type);
@@ -85,9 +107,22 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
     if (t === "AIGraph") graphs.set(tid, [num(params[0]), num(params[1]), num(params[2])]);
     else if (t === "AlarmControl") alarms.set(tid, [num(params[0]), num(params[1]), num(params[2])]);
     else if (t === "PatrolPath") sharedPatrols.set(tid, patrolCommands(children));
+    else if (t === "StationaryGun" && tid >= 0) {
+      guns.set(tid, {
+        taskId: tid,
+        position: [num(params[0]), num(params[1]), num(params[2])],
+        yaw: num(params[5]) || 0,
+        holderModel: String(params[6] ?? ""),
+        weapon: String(params[7] ?? "WEAPON_ID_M2HB"),
+        maxUp: num(params[8]) || 0,
+        maxDown: num(params[9]) || 0,
+        maxSide: Number.isFinite(num(params[10])) ? num(params[10]) : 180,
+        ammo: Number.isFinite(num(params[11])) ? num(params[11]) : -1,
+      });
+    }
     // Ekk and Anya (level14) are HumanSoldierFemale tasks, with the same parameters as HumanSoldier.
     else if (t === "HumanSoldier" || t === "HumanSoldierFemale") {
-      characters.push({ ...character(tid, String(name), params, children, scripted), gates, generator });
+      characters.push({ ...character(tid, String(name), params, children, scripted), gates, generator, vehicle });
       return;
     }
     // Level 1 keeps its whole dynamic world in a container named "Cutscenes"; only the conditional cutscenes inside
@@ -96,12 +131,13 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
     const inside = scripted || SCRIPTED_PARENTS.has(t) || cutscene;
     const gated = t === "ConditionalContainer" && tid >= 0 ? [...gates, tid] : gates;
     const gen = t === "GuardGenerator" ? { taskId: tid, condition: String(params[0] ?? ""), maxSpawns: num(params[1]) || 1 } : generator;
-    for (const c of children) visit(c, inside, gated, gen);
+    const ride = SCRIPTED_PARENTS.has(t) ? t : vehicle;
+    for (const c of children) visit(c, inside, gated, gen, ride);
   }
 
   for (const s of statements) visit(s, false, []);
   for (const c of characters) for (const [id, commands] of sharedPatrols) if (!c.patrols.has(id)) c.patrols.set(id, commands);
-  return { characters, graphs, alarms, taskPositions };
+  return { characters, graphs, alarms, taskPositions, guns };
 }
 
 function patrolCommands(children: QvmCall[]): PatrolCommand[] {
@@ -136,7 +172,7 @@ function character(taskId: number, name: string, p: QvmValue[], children: QvmCal
     } else if (t === "PatrolPath") {
       spec.patrols.set(num(id), patrolCommands(rest.filter(isCall)));
     } else if (/^(Gun|Binocular)/.test(t) && typeof rest[0] === "string") {
-      spec.weapons.push(rest[0]);
+      spec.weapons.push(rest[0].trim());
     }
   }
   return spec;

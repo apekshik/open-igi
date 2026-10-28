@@ -14,17 +14,35 @@ import { parseAiGraph } from "../../formats/graph.ts";
 import { decodeQvm, decodeQvmScript, type QvmCall, type QvmScript } from "../../formats/qvm.ts";
 import { METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Game, GameSystem } from "../game.ts";
-import type { AiEvent, AiService } from "./api.ts";
+import type { Entity } from "../entity.ts";
+import type { AiDifficulty, AiEvent, AiService } from "./api.ts";
 import { SoldierBody } from "./body.ts";
+import { MountedGun } from "./gun.ts";
 import { aiConfigs, aiLevelData, commonScriptName, DEFAULT_CONFIG, type AiConfig, type AiLevelData, type CharacterSpec } from "./level.ts";
 import { dist, NavGraph } from "./nav.ts";
 import { Soldier, type AiWorld, type WeaponInfo } from "./soldier.ts";
 
-/** Hearing range of an unsilenced gunshot (HUMANAI_DETECTIONEVENT_GUNSHOT_RANGE; value not in the data, chosen). */
-const GUNSHOT_RANGE = 80 * METRE;
-const SILENCED_RANGE = 8 * METRE;
-/** A bullet passing this close counts as AIEVENT_GUNSHOTMISS. */
+/**
+ * How far soldiers hear a shot: each weapon's "AI Detection Event Range" (DefineWeaponType) names one of two
+ * constants that IGI.exe registers for the scripts, HUMANAI_DETECTIONEVENT_GUNSHOT_RANGE = 0x1E000 units (30 m) and
+ * HUMANAI_DETECTIONEVENT_GUNSHOT_SILENCED_RANGE = 0x1000 (1 m): the MP5SD, the knife and thrown grenades.
+ */
+const GUNSHOT_RANGE = 30 * METRE;
+const SILENCED_RANGE = 1 * METRE;
+/** A bullet passing this close counts as AIEVENT_GUNSHOTMISS (not in the data; chosen). */
 const NEAR_MISS = 2 * METRE;
+/** Soldiers this close to a door the player opens or closes get AIEVENT_DOOR (not in the data; chosen). */
+const DOOR_HEARING = 10 * METRE;
+
+const DIFFICULTIES: AiDifficulty[] = ["easy", "normal", "hard"];
+
+function difficultyFromUrl(): AiDifficulty {
+  const v = new URLSearchParams(location.search).get("difficulty")?.toLowerCase();
+  if (!v) return "normal";
+  const n = Number(v.replace(/^gd_/, ""));
+  if (n >= 1 && n <= 3) return DIFFICULTIES[n - 1];
+  return DIFFICULTIES.includes(v as AiDifficulty) ? (v as AiDifficulty) : "normal";
+}
 /** Bone that carries the gun in the soldier skeletons (the 20-21-22 chain off the spine; 22 sits in the right hand). */
 const GUN_BONE = 22;
 
@@ -57,7 +75,15 @@ class AiSystem implements AiService, AiWorld {
   private commonScripts = new Map<string, QvmScript | null>();
   private configs = new Map<string, AiConfig>();
   private weaponDefs = new Map<string, WeaponInfo>();
-  private difficulty = `GD_${new URLSearchParams(location.search).get("difficulty") ?? "2"}`;
+  private level: AiDifficulty = difficultyFromUrl();
+  private guns = new Map<number, MountedGun>();
+  private doorList: Entity[] | null = null;
+  private doorListTime = -Infinity;
+  frameTime = 0;
+  /** The latest explosion (its damage events follow it in the same frame). */
+  private blast: { sourceId: number | null; time: number } | null = null;
+  /** Characters spawned because their ConditionalContainers run (they are removed when one stops). */
+  private gated = new Set<Soldier>();
   private unsubscribe: (() => void)[] = [];
   private markers = new Map<Soldier, THREE.Mesh>();
   private pending: CharacterSpec[] = [];
@@ -75,6 +101,22 @@ class AiSystem implements AiService, AiWorld {
     return this.alarmOn;
   }
 
+  get difficulty(): AiDifficulty {
+    return this.level;
+  }
+
+  set difficulty(value: AiDifficulty) {
+    if (!DIFFICULTIES.includes(value) || value === this.level) return;
+    this.level = value;
+    for (const s of this.soldiers) s.config = this.configFor(s.aiType);
+  }
+
+  /** The type's HumanAIConfigItem for the current difficulty (GD_1..GD_3). */
+  private configFor(aiType: string): AiConfig {
+    const gd = `GD_${DIFFICULTIES.indexOf(this.level) + 1}`;
+    return this.configs.get(`${aiType}/${gd}`) ?? this.configs.get(`${aiType}/GD_2`) ?? DEFAULT_CONFIG;
+  }
+
   async load() {
     const { game } = this;
     const vfs = game.vfs;
@@ -86,6 +128,7 @@ class AiSystem implements AiService, AiWorld {
 
     const wanted = this.data.characters.filter((c) => !c.scripted);
     await Promise.all(wanted.map((c) => this.prepare(c)));
+    this.placeGuns();
     // Characters inside ConditionalContainers wait for them to run (checked through the mission system once it is
     // up); GuardGenerator templates spawn copies while their generator's condition holds.
     for (const spec of wanted) {
@@ -96,18 +139,36 @@ class AiSystem implements AiService, AiWorld {
 
     const on = game.events.on.bind(game.events);
     this.unsubscribe.push(
+      on("explosion", (x) => {
+        this.blast = { sourceId: x.sourceId, time: this.game.time };
+      }),
       on("damage", (d) => {
         // Damage arrives in IGI units with the hit zone already applied; the owner subtracts it.
-        this.byEntity(d.targetId)?.damaged(d.amount, d.part, d.sourceId, d.point, d.direction);
+        const target = this.byEntity(d.targetId);
+        if (!target) return;
+        // Soldiers' bullets do not hurt their own side (their grenades and rockets still do): see docs/formats/ai.md.
+        const source = d.sourceId !== null ? this.byEntity(d.sourceId) : undefined;
+        const blast = this.blast && this.blast.sourceId === d.sourceId && this.blast.time === this.game.time;
+        if (source && source !== target && source.team === target.team && !blast) return;
+        target.damaged(d.amount, d.part, d.sourceId, d.point, d.direction);
       }),
       on("death", (d) => {
         const s = this.byEntity(d.entityId);
         if (s?.alive) s.die(undefined, null, d.killerId, true);
       }),
       on("noise", (n) => {
-        for (const s of this.soldiers) if (s.id !== n.sourceId) s.hear(n.position, n.radius, n.kind, n.sourceId);
+        // Shots are heard through "weapon:fire" at IGI's detection ranges; a thrown grenade is "silenced".
+        if (n.kind === "gunshot") return;
+        const radius = n.kind === "throw" ? SILENCED_RANGE : n.radius;
+        for (const s of this.soldiers) if (s.id !== n.sourceId) s.hear(n.position, radius, n.kind, n.sourceId);
       }),
       on("weapon:fire", (f) => this.shotFired(f.ownerId, f.origin, f.direction, f.silenced)),
+      on("door:move", (d) => {
+        // A door the player works (soldiers open doors right in front of themselves, the player is not near those).
+        const player = game.services.player?.entity;
+        if (!player || dist(player.position, d.position) > 3 * METRE) return;
+        for (const s of this.soldiers) if (s.alive) s.hear(d.position, DOOR_HEARING, "door", player.id);
+      }),
       on("alarm", (a) => {
         if (a.active === this.alarmOn) return;
         this.alarmOn = a.active;
@@ -186,7 +247,17 @@ class AiSystem implements AiService, AiWorld {
     }
   }
 
-  private weaponInfo(id: string): WeaponInfo | null {
+  /** Stationary guns stand in the level from the start; gunners walk to them. */
+  private placeGuns() {
+    for (const spec of this.data.guns.values()) {
+      const model = this.weaponInfo(spec.weapon)?.model ?? "";
+      const gun = new MountedGun(this.game, spec, model);
+      this.game.world.add(gun.object);
+      this.guns.set(spec.taskId, gun);
+    }
+  }
+
+  weaponInfo(id: string): WeaponInfo | null {
     const spec = this.game.services.weapons?.spec(id);
     if (spec) {
       return {
@@ -204,14 +275,14 @@ class AiSystem implements AiService, AiWorld {
     return this.weaponDefs.get(id) ?? null;
   }
 
-  private add(spec: CharacterSpec): Soldier {
+  private add(spec: CharacterSpec, passive = false): Soldier {
     const game = this.game;
     const physics = game.services.physics;
     // Some placements float above the ground (or sink into it): stand them on the floor below them.
     const ground = physics?.groundHeight(spec.position[0], spec.position[1], spec.position[2] + 0.5 * METRE);
     const position: Vec3 = [...spec.position];
     if (ground !== null && ground !== undefined && spec.position[2] - ground < 8 * METRE) position[2] = ground;
-    const config = this.configs.get(`${spec.aiType}/${this.difficulty}`) ?? this.configs.get(`${spec.aiType}/GD_2`) ?? DEFAULT_CONFIG;
+    const config = this.configFor(spec.aiType);
     const weaponId = spec.weapons.find((w) => !/GRENADE|FLASHBANG|BINOCULAR|MEDIPACK|MINE|KNIFE/.test(w)) ?? defaultWeapon(spec.aiType);
     const weapon = weaponId ? this.weaponInfo(weaponId) : null;
     let body: SoldierBody | null = null;
@@ -228,12 +299,27 @@ class AiSystem implements AiService, AiWorld {
       if (gun) body.attachGun(new THREE.Mesh(gun.geometry, gun.materials), GUN_BONE);
     }
     for (const w of spec.weapons) game.services.weapons?.give(soldier.id, w, this.weaponInfo(w)?.clipSize ?? 1);
+    soldier.passive = passive || spec.scripted;
     this.soldiers.push(soldier);
     soldier.post("AIEVENT_CREATE");
     return soldier;
   }
 
+  /** Take a character out of play: its body, entity and markers go; scripts get AIEVENT_DELETE first. */
+  private remove(s: Soldier) {
+    if (s.alive) s.post("AIEVENT_DELETE");
+    s.dismount();
+    s.object?.removeFromParent();
+    this.game.entities.remove(s.id);
+    this.soldiers.splice(this.soldiers.indexOf(s), 1);
+    this.gated.delete(s);
+    const m = this.markers.get(s);
+    m?.removeFromParent();
+    this.markers.delete(s);
+  }
+
   update(dt: number) {
+    const start = performance.now();
     const cam = this.game.camera;
     cam.updateMatrixWorld();
     this.frustum.setFromProjectionMatrix(this.viewProjection.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
@@ -243,6 +329,7 @@ class AiSystem implements AiService, AiWorld {
     }
     for (const s of this.soldiers) s.update(dt);
     if (this.debug || this.markers.size) this.drawDebug();
+    this.frameTime = performance.now() - start;
   }
 
   // ----------------------------------------------------------------------------------------------- AiWorld
@@ -282,15 +369,38 @@ class AiSystem implements AiService, AiWorld {
     this.game.services.audio?.play(`common/sounds/${name}.wav`, { at, volume });
   }
 
-  shoot(s: Soldier, origin: Vec3, dir: Vec3) {
-    const w = s.weapon;
+  doors(): Entity[] {
+    // Mission objects are registered after the AI system starts; look them up lazily and refresh now and then.
+    if (!this.doorList || (!this.doorList.length && this.game.time - this.doorListTime > 5)) {
+      this.doorList = this.game.entities.all().filter((e) => e.kind === "door");
+      this.doorListTime = this.game.time;
+    }
+    return this.doorList;
+  }
+
+  gun(id: number) {
+    return this.guns.get(id);
+  }
+
+  throwGrenade(s: Soldier, weapon: string, origin: Vec3, velocity: Vec3, fuse: number) {
+    const weapons = this.game.services.weapons;
+    if (!weapons) return;
+    weapons.fire(s.id, weapon, origin, vec3.normalize(velocity), { velocity, fuse });
+    this.game.events.emit("ai:grenade", { entityId: s.id, weapon, origin, velocity, fuse });
+  }
+
+  shoot(s: Soldier, origin: Vec3, dir: Vec3, weapon?: WeaponInfo) {
+    const w = weapon ?? s.weapon;
     if (!w) return;
     const game = this.game;
     const weapons = game.services.weapons;
     if (weapons) {
       // Aim error is already in the direction; distant off-screen shooters skip their muzzle effects.
       const quiet = !this.inView(s.position) && dist(s.position, game.fromScene(game.camera.position)) > 60 * METRE;
-      weapons.fire(s.id, w.id, origin, dir, { damageScale: s.config.damageScale, spreadScale: 0.5, quiet });
+      // Shotguns (Spas 12: Damage Factor 0.25, 30 pellets): we read the factor as the whole shell's, shared by its
+      // pellets. Read per pellet, one shell from a guard did up to 7.5 damage (Jones dies at 3); see docs/formats/ai.md.
+      const pellets = Math.max(1, w.pellets);
+      weapons.fire(s.id, w.id, origin, dir, { damageScale: s.config.damageScale / pellets, spreadScale: pellets > 1 ? 1 : 0.5, quiet });
       return;
     }
     // Our own hitscan: first thing along the line within 300 m.
@@ -301,7 +411,7 @@ class AiSystem implements AiService, AiWorld {
     game.events.emit("noise", { position: origin, radius: w.silenced ? SILENCED_RANGE : GUNSHOT_RANGE, sourceId: s.id, kind: "gunshot" });
     if (w.fireSound && Math.random() < 0.5) this.sound(w.fireSound, origin, 0.8);
     if (hit?.entityId !== null && hit?.entityId !== undefined) {
-      const amount = w.damage * s.config.damageScale * w.pellets;
+      const amount = w.damage * s.config.damageScale;
       game.events.emit("damage", { targetId: hit.entityId, amount, sourceId: s.id, point: hit.point, direction: dir, part: hit.part });
     }
   }
@@ -317,7 +427,10 @@ class AiSystem implements AiService, AiWorld {
     return e instanceof Soldier ? e : undefined;
   }
 
-  /** Spawn the gated characters whose containers now run, and generator copies whose conditions hold. */
+  /**
+   * Spawn the gated characters whose containers now run, and generator copies whose conditions hold; remove the ones
+   * whose containers stopped (IGI deletes a ConditionalContainer's subtree when it stops; it can come back fresh).
+   */
   private spawnPending() {
     const mission = this.game.services.mission;
     const test = (expression: string, self?: number) => {
@@ -329,9 +442,15 @@ class AiSystem implements AiService, AiWorld {
         return true;
       }
     };
+    for (const s of [...this.soldiers]) {
+      // Only characters that entered play with their containers running leave with them (not ones spawned by request).
+      if (!this.gated.has(s) || gatesOpen(s.spec, test)) continue;
+      this.remove(s);
+      if (!s.spec.generator && !this.pending.includes(s.spec)) this.pending.push(s.spec);
+    }
     this.pending = this.pending.filter((spec) => {
       if (!gatesOpen(spec, test)) return true;
-      this.add(spec);
+      this.gated.add(this.add(spec));
       return false;
     });
     for (const g of this.generators) {
@@ -340,6 +459,7 @@ class AiSystem implements AiService, AiWorld {
       // One guard at a time: the next comes when the last is down or a few seconds have passed.
       if (g.copies.some((c) => c.alive) && this.game.time - g.last < 8) continue;
       const copy = this.add({ ...g.spec, taskId: g.spawned === 0 ? g.spec.taskId : -1 });
+      if (g.spec.gates.length) this.gated.add(copy);
       copy.lastKnown = this.game.services.player ? [...this.game.services.player.entity.position] : null;
       if (this.alarmOn) copy.post("AIEVENT_ALARMON");
       g.copies.push(copy);
@@ -352,7 +472,7 @@ class AiSystem implements AiService, AiWorld {
     return this.generators.find((g) => g.spec.generator!.taskId === taskId)?.spawned ?? 0;
   }
 
-  spawn(taskId: number) {
+  spawn(taskId: number, options: { passive?: boolean; passenger?: { anchor: () => { position: Vec3; yaw: number } | null } } = {}) {
     const existing = this.byTask(taskId);
     if (existing) return existing;
     const spec = this.data.characters.find((c) => c.taskId === taskId);
@@ -360,20 +480,30 @@ class AiSystem implements AiService, AiWorld {
     this.pending = this.pending.filter((p) => p !== spec);
     // Scripts and graphs load asynchronously; the character starts with its type's defaults until they arrive.
     void this.prepare(spec);
-    return this.add(spec);
+    const s = this.add(spec, options.passive ?? !!options.passenger);
+    s.passive = options.passive ?? (!!options.passenger || spec.scripted);
+    if (options.passenger) s.anchor = options.passenger.anchor;
+    return s;
+  }
+
+  despawn(taskId: number) {
+    const s = this.byTask(taskId);
+    if (s) this.remove(s);
   }
 
   send(entityId: number, event: AiEvent, options?: { position?: Vec3; animation?: number }) {
     this.byEntity(entityId)?.post(event, options);
   }
 
-  /** Every soldier near a shot hears it; the ones it passed close to flinch from the near miss. */
+  /**
+   * Every soldier within the weapon's detection range hears a shot (comrades' shots too, which is how a fight draws
+   * the guards around it); the ones the bullet passed close to react to the near miss.
+   */
   private shotFired(ownerId: number, origin: Vec3, dir: Vec3, silenced: boolean) {
-    const owner = this.game.entities.get(ownerId);
-    if (owner instanceof Soldier) return; // soldiers' own shots are heard through their "noise"
+    const range = silenced ? SILENCED_RANGE : GUNSHOT_RANGE;
     for (const s of this.soldiers) {
-      if (!s.alive) continue;
-      s.hear(origin, silenced ? SILENCED_RANGE : GUNSHOT_RANGE, "gunshot", ownerId);
+      if (!s.alive || s.id === ownerId) continue;
+      s.hear(origin, range, "gunshot", ownerId);
       const chest: Vec3 = [s.position[0], s.position[1], s.position[2] + 1.2 * METRE];
       const rel = vec3.sub(chest, origin);
       const along = vec3.dot(rel, dir);
@@ -402,6 +532,7 @@ class AiSystem implements AiService, AiWorld {
   dispose() {
     for (const u of this.unsubscribe) u();
     for (const s of this.soldiers) s.object?.removeFromParent();
+    for (const g of this.guns.values()) g.object.removeFromParent();
     for (const m of this.markers.values()) m.removeFromParent();
   }
 }
