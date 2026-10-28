@@ -31,6 +31,11 @@ export interface RaycastOptions {
   ignoreEntity?: number;
   /** Test entities as well as static geometry (default true). */
   entities?: boolean;
+  /**
+   * A bullet: fly through surfaces that don't stop bullets in IGI (rail and chain-link fences, glass). Everything else
+   * (grenades, ladder checks, cameras) leaves this off and treats them as solid.
+   */
+  bullet?: boolean;
 }
 
 export interface GroundHit {

@@ -65,7 +65,7 @@ export function playerSystem(): GameSystem {
       game.services.player = player;
       // Debug third-person view. Input has no action for it, so listen for the key directly.
       onKey = (e) => {
-        if (e.code === "KeyV" && !e.repeat && game.input.locked) player.thirdPerson = !player.thirdPerson;
+        if (e.code === "KeyV" && !e.repeat && game.input.locked) player.thirdPerson = !player.debugView;
       };
       window.addEventListener("keydown", onKey);
     },
@@ -131,7 +131,19 @@ class Player implements PlayerService {
   gait: Gait = "idle";
   lean = 0;
   dead = false;
-  thirdPerson = false;
+  /** The debug third-person toggle (V). */
+  private debugThirdPerson = false;
+  /** Third person while climbing a ladder, as IGI shows it, or when toggled with V. */
+  get thirdPerson() {
+    return this.debugThirdPerson || this.climbing;
+  }
+  set thirdPerson(on: boolean) {
+    this.debugThirdPerson = on;
+  }
+  /** Is the V toggle on (regardless of ladders)? */
+  get debugView() {
+    return this.debugThirdPerson;
+  }
 
   private game: Game;
   private data: PlayerData;

@@ -1598,7 +1598,7 @@ class CombatAction implements Action {
     if (!physics) return true;
     this.aimHead = !physics.lineOfSight(s.eye(), chest);
     const aim = this.aimHead ? head : chest;
-    const hit = physics.raycast(from, aim, { ignoreEntity: s.id });
+    const hit = physics.raycast(from, aim, { ignoreEntity: s.id, bullet: true });
     if (!hit || hit.entityId === target.id) return true;
     const e = hit.entityId !== null ? s.game.entities.get(hit.entityId) : undefined;
     if (e instanceof Soldier) return true; // comrades are handled shot by shot
