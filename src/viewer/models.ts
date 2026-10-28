@@ -1,7 +1,9 @@
 // Model browser: one level's models with textures resolved through the level's .mtp material table.
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { levelLibrary, type ModelLibrary } from "../render/library.ts";
+import { poseBones, type Animation } from "../formats/anim.ts";
+import { skinMef } from "../formats/mef.ts";
+import { levelLibrary, type BuiltModel, type ModelLibrary } from "../render/library.ts";
 import type { Vfs } from "../vfs/vfs.ts";
 import { createStage, levelNames } from "./stage.ts";
 
@@ -10,16 +12,47 @@ export function modelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
   const levelSelect = document.createElement("select");
   const modelSelect = document.createElement("select");
   const wire = Object.assign(document.createElement("input"), { type: "checkbox", title: "wireframe" });
-  toolbar.append(levelSelect, modelSelect, wire);
+  // Skinned (type 1) models: bind pose, or one of the skeleton's animations, played back in a loop.
+  const poseSelect = document.createElement("select");
+  poseSelect.title = "pose";
+  toolbar.append(levelSelect, modelSelect, wire, poseSelect);
 
   const { scene, camera, renderer } = createStage(host);
   const controls = new OrbitControls(camera, renderer.domElement);
-  renderer.setAnimationLoop(() => {
+  let current: THREE.Object3D | null = null;
+  let library: ModelLibrary | null = null;
+  let built: BuiltModel | null = null;
+  let playing: { anim: Animation; start: number } | null = null;
+
+  renderer.setAnimationLoop((now) => {
+    if (playing && built?.skin) applyPose(built, playing.anim, now - playing.start);
     controls.update();
     renderer.render(scene, camera);
   });
-  let current: THREE.Object3D | null = null;
-  let library: ModelLibrary | null = null;
+
+  /** Re-skin `b` with an animation frame (time in ms; IGI animation time looks like ms at 1x), or the bind pose. */
+  function applyPose(b: BuiltModel, anim: Animation | null, timeMs = 0) {
+    const skin = b.skin!;
+    const posed = skinMef(skin.model, poseBones(skin.anims.skeleton, anim ?? undefined, timeMs, true));
+    const pos = b.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const nrm = b.geometry.getAttribute("normal") as THREE.BufferAttribute;
+    (pos.array as Float32Array).set(posed.positions);
+    (nrm.array as Float32Array).set(posed.normals);
+    pos.needsUpdate = nrm.needsUpdate = true;
+  }
+
+  function choosePose() {
+    const url = new URLSearchParams(location.search);
+    if (poseSelect.value && !poseSelect.hidden) url.set("pose", poseSelect.value);
+    else url.delete("pose");
+    history.replaceState(null, "", `?${url}`);
+    playing = null;
+    if (!built?.skin) return;
+    const anim = poseSelect.value === "" ? null : built.skin.anims.animations[Number(poseSelect.value)];
+    if (anim) playing = { anim, start: performance.now() };
+    else applyPose(built, null);
+  }
+  poseSelect.addEventListener("change", choosePose);
 
   const levels = levelNames(vfs);
   levelSelect.replaceChildren(...levels.map((l) => new Option(l, l)));
@@ -37,13 +70,25 @@ export function modelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
   function showModel(index: number) {
     if (!library) return;
     const name = library.levelModels[index];
-    let built;
     try {
       built = library.build(name);
     } catch (err) {
+      built = null;
       return status(`${name}: ${(err as Error).message}`);
     }
     if (!built) return status(`${name}: not found`);
+    const skin = built.skin;
+    poseSelect.hidden = !skin;
+    poseSelect.replaceChildren(
+      new Option("bind pose", ""),
+      ...(skin?.anims.animations ?? []).map((a, i) => new Option(`anim ${i} (id ${a.id}, ${a.duration})`, String(i))),
+    );
+    poseSelect.value = params.get("pose") ?? "";
+    if (poseSelect.selectedIndex < 0) poseSelect.value = "";
+    params.delete("pose");
+    choosePose();
+    if (playing) applyPose(built, playing.anim, 0);
+    built.geometry.computeBoundingSphere();
 
     if (current) scene.remove(current);
     // IGI is Z-up; three.js is Y-up.
@@ -56,15 +101,18 @@ export function modelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
     const centre = new THREE.Vector3(sphere.center.x, sphere.center.z, -sphere.center.y);
     const r = Math.max(sphere.radius, 1);
     controls.target.copy(centre);
-    camera.position.copy(centre).add(new THREE.Vector3(r * 1.2, r * 0.8, r * 1.6));
+    // Characters face IGI +Y (three.js -Z), so look at them from the front.
+    camera.position.copy(centre).add(new THREE.Vector3(r * 1.2, r * 0.8, skin ? -r * 1.6 : r * 1.6));
     camera.near = r / 100;
     camera.far = r * 100;
     camera.updateProjectionMatrix();
 
     const q = new URLSearchParams({ view: "models", level: levelSelect.value, model: String(index) });
+    if (poseSelect.value && !poseSelect.hidden) q.set("pose", poseSelect.value);
     history.replaceState(null, "", `?${q}`);
     const tris = (built.geometry.index?.count ?? 0) / 3;
-    status(`${name} type ${built.type}, ${tris} tris, ${built.materials.length} batches | ${built.textureNames.join(" ")}`);
+    const rig = skin ? ` | skeleton ${String(skin.anims.skeleton.hierarchy).padStart(3, "0")}.iff (fit ${skin.fitError.toFixed(1)})` : "";
+    status(`${name} type ${built.type}, ${tris} tris, ${built.materials.length} batches${rig} | ${built.textureNames.join(" ")}`);
   }
 
   levelSelect.addEventListener("change", () => loadLevel(levelSelect.value));

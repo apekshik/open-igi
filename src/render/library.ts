@@ -1,8 +1,9 @@
 // Model library: resolves a model name across one or more (models.res, textures.res, .mtp) sets and builds
 // three.js meshes with their real textures. Geometry and materials are cached per model.
 import * as THREE from "three";
+import { parseAnimFile, poseBones, type AnimFile } from "../formats/anim.ts";
 import { readRes } from "../formats/ilff.ts";
-import { decodeMef } from "../formats/mef.ts";
+import { decodeMef, skinFitError, skinMef, type MefModel } from "../formats/mef.ts";
 import { parseMtp, type MaterialTable } from "../formats/mtp.ts";
 import { decodeTex } from "../formats/tex.ts";
 import type { Vfs } from "../vfs/vfs.ts";
@@ -22,6 +23,35 @@ export interface BuiltModel {
   type: number;
   /** "slot→texture" per batch, for display. */
   textureNames: string[];
+  /** Type 1 (skinned) models: the decoded model and the skeleton it is posed with. */
+  skin?: BuiltSkin;
+}
+
+export interface BuiltSkin {
+  model: MefModel;
+  /** Skeleton and animations (common/anims/NNN.iff) that fit this model best. */
+  anims: AnimFile;
+  /** skinFitError of that skeleton, in model units (~1 is a clean fit). */
+  fitError: number;
+}
+
+/** Load every skeleton/animation file in common/anims, ordered by hierarchy number. */
+export async function loadAnimFiles(vfs: Vfs): Promise<AnimFile[]> {
+  const paths = vfs.list().filter((p) => /^common\/anims\/[^/]+\.iff$/i.test(p));
+  const files = await Promise.all(paths.map(async (p) => parseAnimFile(await vfs.read(p))));
+  return files.sort((a, b) => a.skeleton.hierarchy - b.skeleton.hierarchy);
+}
+
+/**
+ * Pick the skeleton for a type 1 model. In game the placement chooses it (objects.qvm HumanSoldier "Bone Heirachy");
+ * without a placement we take the skeleton whose bind pose makes the model's influence records agree best,
+ * preferring the lowest hierarchy number among near-ties (hierarchies 1-3 share one skeleton).
+ */
+export function fitSkeleton(model: MefModel, files: AnimFile[]): { anims: AnimFile; fitError: number } | null {
+  const scored = files.map((anims) => ({ anims, fitError: skinFitError(model, anims.skeleton) }));
+  const best = Math.min(...scored.map((s) => s.fitError));
+  if (!Number.isFinite(best)) return null;
+  return scored.find((s) => s.fitError <= best + 1)!;
 }
 
 const baseName = (path: string) => path.split("/").pop()!.replace(/\.\w+$/, "");
@@ -44,7 +74,7 @@ export async function levelLibrary(vfs: Vfs, level: string): Promise<ModelLibrar
   };
   await add(`missions/location0/${level}`, level);
   await add("missions/location0/common", "location0");
-  return new ModelLibrary(sets);
+  return new ModelLibrary(sets, await loadAnimFiles(vfs));
 }
 
 export class ModelLibrary {
@@ -52,9 +82,12 @@ export class ModelLibrary {
   private textures = new Map<string, THREE.Texture | null>();
   wireframe = false;
   private sets: ModelSet[];
+  /** Skeletons and animations from common/anims, for posing type 1 (skinned) models. */
+  readonly animFiles: AnimFile[];
 
-  constructor(sets: ModelSet[]) {
+  constructor(sets: ModelSet[], animFiles: AnimFile[] = []) {
     this.sets = sets;
+    this.animFiles = animFiles;
   }
 
   /** Model names of the first (level) set, in material-table order. */
@@ -83,8 +116,12 @@ export class ModelLibrary {
   private buildFrom(set: ModelSet, bytes: Uint8Array, slots: number[]): BuiltModel {
     const model = decodeMef(bytes);
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(model.positions, 3));
-    geometry.setAttribute("normal", new THREE.BufferAttribute(model.normals, 3));
+    // Type 1 vertices are bone-relative: pose them in the bind pose of the best-fitting skeleton.
+    const fit = model.skin ? fitSkeleton(model, this.animFiles) : null;
+    const skin: BuiltSkin | undefined = fit ? { model, ...fit } : undefined;
+    const posed = skin ? skinMef(model, poseBones(skin.anims.skeleton)) : model;
+    geometry.setAttribute("position", new THREE.BufferAttribute(posed.positions, 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(posed.normals, 3));
     geometry.setAttribute("uv", new THREE.BufferAttribute(model.uvs, 2));
     const indices = new Uint32Array(model.batches.reduce((n, b) => n + b.indices.length, 0));
     const materials: THREE.Material[] = [];
@@ -109,7 +146,7 @@ export class ModelLibrary {
     });
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeBoundingSphere();
-    return { geometry, materials, type: model.type, textureNames };
+    return { geometry, materials, type: model.type, textureNames, skin };
   }
 
   private texture(name: string): THREE.Texture | null {
