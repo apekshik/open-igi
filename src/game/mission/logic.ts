@@ -23,7 +23,7 @@ import type { Entity } from "../entity.ts";
 import type { GameEvents } from "../events.ts";
 import { evaluate, parseExpression, run, truthy, type ScriptEnv, type ScriptValue } from "./script.ts";
 import { pbool, pnum, pstr, pvec, type TaskNode, type TaskTree } from "./tasks.ts";
-import { applyKey, autopilot, decodeAnimData, guideCar, newVehicleState, stepVehicle, type VehicleKind, type VehicleSpec, type VehicleState } from "./vehicles.ts";
+import { animLength, applyKey, autopilot, decodeAnimData, guideCar, hoverHeli, newVehicleState, stepVehicle, type VehicleKind, type VehicleSpec, type VehicleState } from "./vehicles.ts";
 
 /** Ticks per second of the logic clock (IGI.exe registers GAME_FREQUENCY = 30). */
 export const GAME_FREQUENCY = 30;
@@ -771,7 +771,10 @@ export class AnimTaskTask extends LogicTask {
     super(node, L);
     const data = node.params["AnimData"];
     this.keys = Array.isArray(data) ? decodeAnimData(data) : [];
+    this.length = Array.isArray(data) ? animLength(data) : 0;
   }
+  /** Length of the recording in ticks (its waits added up). */
+  private length: number;
   field(name: string) {
     if (name === "isRun") return this.running ? 1 : 0;
     if (name === "nTick") return this.ticks;
@@ -786,6 +789,10 @@ export class AnimTaskTask extends LogicTask {
       this.fresh.push(k);
     }
     this.ticks++;
+  }
+  /** Played every key and waited out the last wait: the recording is over. */
+  get played(): boolean {
+    return this.next >= this.keys.length && this.ticks >= this.length;
   }
   /** Played some of its keys but not all: a paused drive (its Run condition went false on the way). */
   get paused(): boolean {
@@ -1645,7 +1652,7 @@ const VEHICLE_HEALTH: Record<VehicleKind, number> = { car: 12, heli: 9, plane: 9
 /**
  * Car, Heli and Plane: moved by the AnimTask that targets them (recorded inputs; vehicles.ts), drawn and colliding as
  * mission objects, destroyed (`isExploded`) by enough damage. Without a running AnimTask their controls are
- * released: cars roll to a stop, helicopters hold their last collective.
+ * released: cars roll to a stop, helicopters hold a hover.
  */
 export class VehicleTask extends ObjectTask {
   readonly kind: VehicleKind;
@@ -1722,7 +1729,10 @@ export class VehicleTask extends ObjectTask {
     } else if (this.driver && this.kind === "car") inputs = this.drive();
     else if (anim?.paused && this.kind === "car") inputs = this.settle();
     const ground = this.L.world.ground;
-    stepVehicle(this.state, this.spec, inputs, 1 / GAME_FREQUENCY, (x, y, z) => ground?.(x, y, z, this.node.id) ?? null);
+    const query = (x: number, y: number, z: number) => ground?.(x, y, z, this.node.id) ?? null;
+    // A helicopter without a recording playing (not started, paused, or played out) holds a hover.
+    if (this.kind === "heli" && !(anim?.running && !anim.played)) hoverHeli(this.state, this.spec, 1 / GAME_FREQUENCY, query);
+    else stepVehicle(this.state, this.spec, inputs, 1 / GAME_FREQUENCY, query);
     if (this.kind === "car" && anim?.running) {
       // Each vehicle area guides a car until the car has been inside it, then the next one ahead takes over.
       const areas = this.L.vehicleAreas();

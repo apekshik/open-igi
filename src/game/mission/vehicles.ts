@@ -9,7 +9,8 @@
 //     -1 meaning "key released".
 // We do not run IGI's physics (its DefinePhysicsObjType parameters are mostly undecoded); these are simple models
 // tuned so the recorded inputs give plausible paths: cars follow the ground with a bicycle steering model, helicopters
-// tilt their rotor thrust, planes fly along their nose. Pure TypeScript: the caller passes a ground query.
+// tilt their rotor thrust (rate-command cyclic, fitted to the levels' cutscenes and scripts), planes fly along their
+// nose. Pure TypeScript: the caller passes a ground query.
 
 import type { Vec3 } from "../coords.ts";
 
@@ -35,6 +36,8 @@ export interface VehicleState {
   levers: Map<number, number>;
   /** Forward speed (cars and planes), units per second. */
   speed: number;
+  /** A helicopter resting on the ground. */
+  landed?: boolean;
 }
 
 export interface VehicleSpec {
@@ -62,8 +65,6 @@ export function newVehicleState(position: Vec3, orientation: Vec3, velocity: Vec
 /** Lever channels of each kind (value -1 = released, keep the last value). Others are axes. */
 const CAR = { steer: 0, throttle: 1, brake: 3, levers: new Set([1, 3, 4]) };
 const HELI = { roll: 1, pitch: 0, yaw: 2, collective: 3, levers: new Set([3]) };
-/** Channel mapping (our reading, not confirmed): channel 0 is the fore/aft cyclic (+1 nose down), 1 the lateral cyclic. */
-const HELI_SIGNS = { pitch: -1, roll: 1, yaw: -1, pitchChannel: 0, rollChannel: 1 };
 const PLANE = { roll: 0, pitch: 1, yaw: 2, throttle: 3, levers: new Set([3, 5, 6, 7, 8, 9]) };
 
 /** Apply one AnimData key to the state's levers; returns true if it was a lever. */
@@ -140,38 +141,103 @@ function stepCar(s: VehicleState, spec: VehicleSpec, inputs: Inputs, dt: number,
 
 // ----------------------------------------------------------------------------------------------------- helicopters
 
-/** Cyclic and pedal inputs are angular accelerations, damped (rad/s², 1/s). */
-const HELI_TILT_ACCEL = 2.0;
-const HELI_YAW_ACCEL = 1.5;
-const HELI_RATE_DAMPING = 2.5;
-/** Horizontal drag (1/s) and vertical drag. */
-const HELI_DRAG = 0.15;
-const HELI_DRAG_Z = 1.0;
-const HELI_MAX_TILT = 0.9;
+/**
+ * Helicopter model constants, fitted to where the levels' scripts and cutscene cameras expect the recorded flights to
+ * be (docs/formats/dynamic.md, "Helicopters"): the cyclic and pedal inputs are rate commands (the tilt or heading
+ * changes while a key is held and stays when it is released: the recordings are short taps that a pilot corrects with
+ * opposite taps), the collective lever scales rotor thrust along the body's up axis (hover a little above 1).
+ *  - pitchRate, rollRate, yawRate: rad/s while channel 0 (-1 nose down), 1 (+1 bank right), 2 (+1 turn right) is held;
+ *  - lift: thrust per unit collective, in g (hover at 1 / lift);
+ *  - groundEffect, groundEffectHeight: extra thrust near the ground, fading out by that height (m). Mission 10's Huey
+ *    lifts off a hillside and skims it at collective 1.04 before descending to the town at 0.96;
+ *  - liftOff: thrust (g) a landed helicopter needs to leave the ground (Mission 3's insertion helicopter lands at
+ *    collective 0.92, then sets 1.04 while Jones jumps out; Mission 10's roof helicopter takes off at 1.2);
+ *  - drag, dragZ: horizontal and vertical velocity damping (1/s); maxClimb: vertical speed limit (m/s, our choice:
+ *    the intro flights hold collective 1.5 for a minute); maxSpeed: horizontal speed limit (m/s, our choice: the long
+ *    gunship patrols of Missions 7 and 10 lean further and further forward, about 250 km/h is a Mi-24's top speed);
+ *  - hoverBrake: deceleration (m/s²) of a helicopter holding a hover once its recording has ended.
+ */
+export const HELI_TUNING = {
+  pitchRate: 0.03,
+  rollRate: 0.06,
+  yawRate: 0.08,
+  rateLag: 0.2,
+  maxTilt: 0.6,
+  lift: 0.98,
+  groundEffect: 0.08,
+  groundEffectHeight: 20,
+  liftOff: 1.12,
+  drag: 0.02,
+  dragZ: 0.3,
+  maxClimb: 4,
+  maxSpeed: 70,
+  hoverBrake: 6,
+};
 
 function stepHeli(s: VehicleState, spec: VehicleSpec, inputs: Inputs, dt: number, ground: GroundQuery) {
+  const T = HELI_TUNING;
   const r = s.rates;
-  const k = HELI_SIGNS;
-  r[0] += (axis(inputs, k.pitchChannel) * k.pitch * HELI_TILT_ACCEL - r[0] * HELI_RATE_DAMPING) * dt;
-  r[1] += (axis(inputs, k.rollChannel) * k.roll * HELI_TILT_ACCEL - r[1] * HELI_RATE_DAMPING) * dt;
-  r[2] += (axis(inputs, HELI.yaw) * k.yaw * HELI_YAW_ACCEL - r[2] * HELI_RATE_DAMPING) * dt;
   const o = s.orientation;
-  o[0] = clamp(o[0] + r[0] * dt, -HELI_MAX_TILT, HELI_MAX_TILT);
-  o[1] = clamp(o[1] + r[1] * dt, -HELI_MAX_TILT, HELI_MAX_TILT);
+  const lag = Math.min(1, dt / T.rateLag);
+  r[0] += (axis(inputs, HELI.pitch) * T.pitchRate - r[0]) * lag;
+  r[1] += (axis(inputs, HELI.roll) * T.rollRate - r[1]) * lag;
+  r[2] += (-axis(inputs, HELI.yaw) * T.yawRate - r[2]) * lag;
+  o[0] = clamp(o[0] + r[0] * dt, -T.maxTilt, T.maxTilt);
+  o[1] = clamp(o[1] + r[1] * dt, -T.maxTilt, T.maxTilt);
   o[2] += r[2] * dt;
-  // Rotor thrust along the body's up axis; collective 1 holds a level hover, more is needed to hold height while
-  // tilted into forward flight.
   const collective = s.levers.get(HELI.collective) ?? 1;
   const up = bodyUp(o);
-  const thrust = collective * G;
+  const p = s.position;
+  const below = ground(p[0], p[1], p[2] - spec.bottom + METRE);
+  const height = below ? (p[2] - spec.bottom - below.z) / METRE : Infinity;
+  const thrust = collective * T.lift * G * (1 + T.groundEffect * Math.max(0, 1 - height / T.groundEffectHeight));
   const v = s.velocity;
-  v[0] += (up[0] * thrust - v[0] * HELI_DRAG) * dt;
-  v[1] += (up[1] * thrust - v[1] * HELI_DRAG) * dt;
-  v[2] += (up[2] * thrust - G - v[2] * HELI_DRAG_Z) * dt;
+  if (s.landed && up[2] * thrust < T.liftOff * G) {
+    // Not enough to take off: sit on the skids and settle level.
+    s.velocity = [0, 0, 0];
+    s.rates = [0, 0, 0];
+    o[0] *= 0.8;
+    o[1] *= 0.8;
+    s.speed = 0;
+    return;
+  }
+  v[0] += (up[0] * thrust - v[0] * T.drag) * dt;
+  v[1] += (up[1] * thrust - v[1] * T.drag) * dt;
+  v[2] = clamp(v[2] + (up[2] * thrust - G - v[2] * T.dragZ) * dt, -T.maxClimb * METRE, T.maxClimb * METRE);
+  const horizontal = Math.hypot(v[0], v[1]);
+  if (horizontal > T.maxSpeed * METRE) {
+    v[0] *= (T.maxSpeed * METRE) / horizontal;
+    v[1] *= (T.maxSpeed * METRE) / horizontal;
+  }
+  moveHeli(s, spec, dt, ground);
+}
+
+/**
+ * A helicopter whose recording has ended (or has none) holds a hover where it is: it levels out and brakes to a stop
+ * (Mission 10's Huey waits over the roof for Priboi). A landed one stays on the ground.
+ */
+export function hoverHeli(s: VehicleState, spec: VehicleSpec, dt: number, ground: GroundQuery) {
+  const T = HELI_TUNING;
+  const o = s.orientation;
+  s.rates = [0, 0, 0];
+  const level = 0.3 * dt;
+  o[0] -= clamp(o[0], -level, level);
+  o[1] -= clamp(o[1], -level, level);
+  const v = s.velocity;
+  const speed = Math.hypot(v[0], v[1], v[2]);
+  const k = speed > 0 ? Math.max(0, speed - T.hoverBrake * METRE * dt) / speed : 0;
+  s.velocity = [v[0] * k, v[1] * k, v[2] * k];
+  moveHeli(s, spec, dt, ground);
+}
+
+function moveHeli(s: VehicleState, spec: VehicleSpec, dt: number, ground: GroundQuery) {
+  const v = s.velocity;
+  const o = s.orientation;
   const p = s.position;
   const next: Vec3 = [p[0] + v[0] * dt, p[1] + v[1] * dt, p[2] + v[2] * dt];
   const g = ground(next[0], next[1], next[2] + spec.bottom + METRE);
-  if (g && next[2] - spec.bottom < g.z) {
+  s.landed = !!g && next[2] - spec.bottom <= g.z + 1;
+  if (g && s.landed) {
     // Landed: rest on the skids and settle level.
     next[2] = g.z + spec.bottom;
     v[0] *= 0.8;
@@ -246,6 +312,23 @@ export function rotate(o: Vec3, v: Vec3): Vec3 {
 
 const bodyUp = (o: Vec3) => rotate(o, [0, 0, 1]);
 const bodyForward = (o: Vec3) => rotate(o, [0, 1, 0]);
+
+/** How long AnimData runs, in ticks: its waits added up. */
+export function animLength(data: readonly number[]): number {
+  let ticks = 0;
+  for (const k of decodeAnimDataRaw(data)) if (k.channel === WAIT_CHANNEL) ticks += k.value;
+  return ticks;
+}
+
+function* decodeAnimDataRaw(data: readonly number[]) {
+  const count = data[0] ?? 0;
+  for (let k = 0; k < count; k++) {
+    const channel = data[1 + k * 2];
+    const value = data[2 + k * 2];
+    if (channel === undefined || value === undefined) return;
+    yield { channel, value };
+  }
+}
 
 /** Decode AnimData (count, then channel/value pairs; channel 32 waits value ticks) into timed keys. */
 export function decodeAnimData(data: readonly number[]): { tick: number; channel: number; value: number }[] {

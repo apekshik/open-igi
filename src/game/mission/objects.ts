@@ -28,7 +28,11 @@ const DOOR_REACH = 1.4 * METRE;
 /** Characters this close to a closing door's centre are tested against its leaf. */
 const DOOR_BLOCK_RANGE = 4 * METRE;
 
-/** Attached parts that spin: helicopter rotor hubs and tail rotors (rad/s about their own axis). */
+/**
+ * Attached parts that spin: helicopter rotor hubs and tail rotors, with the vehicle axis they turn about (main rotors
+ * about its up axis, tail rotors about its side axis) and rad/s. The hubs' attachment matrices turn their own axes
+ * (the Huey's main hub has its local Y up), so the spin is applied about whichever local axis lies along that one.
+ */
 const SPINNING: Record<string, { axis: "x" | "y" | "z"; speed: number }> = {
   "711_01_1": { axis: "z", speed: 30 },
   "712_01_1": { axis: "x", speed: 45 },
@@ -48,6 +52,11 @@ interface Visual {
   collider: DynamicCollider | null;
   /** Spinning attached parts (rotors). */
   spinners?: { object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }[];
+  /**
+   * Attached parts with collision of their own (a tank's turret and gun, a truck's wheels): each is a collider placed
+   * at the part's pose under the vehicle, reporting the vehicle's entity, so bullets and rockets hit them too.
+   */
+  parts?: { object: THREE.Object3D; model: string; collider: DynamicCollider | null }[];
 }
 
 export class MissionObjects {
@@ -157,12 +166,14 @@ export class MissionObjects {
   ground(x: number, y: number, z: number, ignoreTaskId?: number): { z: number; normal: Vec3 } | null {
     const physics = this.game.services.physics;
     if (!physics) return null;
-    const own = ignoreTaskId === undefined ? undefined : this.visuals.find((v) => v.task.node.id === ignoreTaskId)?.collider;
-    const was = own?.enabled;
-    if (own) own.enabled = false;
+    const v = ignoreTaskId === undefined ? undefined : this.visuals.find((v) => v.task.node.id === ignoreTaskId);
+    // The object's own colliders (body and attached parts: a helicopter's skids, a tank's turret).
+    const own = v ? [v.collider, ...(v.parts ?? []).map((p) => p.collider)].filter((c): c is DynamicCollider => !!c) : [];
+    const was = own.map((c) => c.enabled);
+    for (const c of own) c.enabled = false;
     const g = physics.ground ? physics.ground(x, y, z) : null;
     const h = g ? null : physics.groundHeight(x, y, z);
-    if (own) own.enabled = was!;
+    own.forEach((c, i) => (c.enabled = was[i]));
     if (g) return { z: g.z, normal: g.normal };
     return h === null ? null : { z: h, normal: [0, 0, 1] };
   }
@@ -179,7 +190,8 @@ export class MissionObjects {
       if (!built) return;
       if (!built.geometry.boundingBox) built.geometry.computeBoundingBox();
       box.union(built.geometry.boundingBox!.clone().applyMatrix4(m));
-      if (depth < 2) for (const a of this.attachments(name)) add(a.model, m.clone().multiply(a.matrix), depth + 1);
+      // Rotors are left out: blades turn through any height (a Huey's reached 4 m below its skids).
+      if (depth < 2) for (const a of this.attachments(name)) if (!SPINNING[a.model]) add(a.model, m.clone().multiply(a.matrix), depth + 1);
     };
     add(model, new THREE.Matrix4(), 0);
     const out = box.isEmpty() ? null : { length: box.max.y - box.min.y, bottom: -box.min.z };
@@ -214,6 +226,8 @@ export class MissionObjects {
       v.mesh = this.build(model);
       if (v.mesh) v.group.add(v.mesh);
       // Vehicles bring their wheels, rotors and doors as attached sub-models.
+      for (const part of v.parts ?? []) part.collider?.remove();
+      v.parts = [];
       if (v.mesh && t instanceof VehicleTask) this.addAttachments(v, v.mesh, model, 0);
       v.collider?.remove();
       v.collider = null;
@@ -248,6 +262,9 @@ export class MissionObjects {
     if (rebuilt && model) {
       v.group.updateMatrix();
       v.collider = this.game.services.physics?.addDynamic?.(model, v.group.matrix.elements, { entityId: v.entity.id }) ?? null;
+      for (const part of v.parts ?? []) {
+        part.collider = this.game.services.physics?.addDynamic?.(part.model, this.partMatrix(v, part.object).elements, { entityId: v.entity.id }) ?? null;
+      }
       // Some buildings carry the closed door leaf in their own collision; the Door object takes its place.
       if (v.collider && t instanceof DoorTask) {
         const closed = t.pose(0);
@@ -265,6 +282,11 @@ export class MissionObjects {
       v.collider.enabled = v.group.visible;
       if (t instanceof DoorTask && t.moving < 0 && !t.scriptedClose) this.reopenIfBlocked(t, v.collider);
     }
+    for (const part of v.parts ?? []) {
+      if (!part.collider) continue;
+      part.collider.setMatrix(this.partMatrix(v, part.object).elements);
+      part.collider.enabled = v.group.visible;
+    }
     v.entity.position = pos;
     v.entity.alive = !t.exploded && t.active && !!model;
     v.entity.health = Math.max(0, t.health);
@@ -277,12 +299,46 @@ export class MissionObjects {
       const holder = new THREE.Group();
       holder.matrixAutoUpdate = false;
       holder.matrix.copy(a.matrix);
+      const spin = SPINNING[a.model];
+      // A rotor hub's ATTA rotation, read like every other attachment's, stands the Huey's main rotor on its side
+      // (mast pointing back, blades up); its transpose puts the mast down into the cabin and the blades level. IGI
+      // turns rotors with their own TASKTYPE_ROTOR physics objects, so we take the transposed one for spinning hubs.
+      if (spin) {
+        const t = new THREE.Matrix4().extractRotation(a.matrix).transpose();
+        holder.matrix.copy(t.setPosition(new THREE.Vector3().setFromMatrixPosition(a.matrix)));
+      }
       holder.add(mesh);
       parent.add(holder);
-      const spin = SPINNING[a.model];
-      if (spin) (v.spinners ??= []).push({ object: mesh, ...spin });
+      if (spin) (v.spinners ??= []).push({ object: mesh, axis: this.localAxis(v, holder, spin.axis), speed: spin.speed });
+      // Spinning rotors stay out of the collision (a blurred disc, not a solid one); other parts collide.
+      else (v.parts ??= []).push({ object: mesh, model: a.model, collider: null });
       if (depth < 1) this.addAttachments(v, mesh, a.model, depth + 1);
     }
+  }
+
+  /** The axis of `holder`'s own frame that lies along the vehicle's `axis`. */
+  private localAxis(v: Visual, holder: THREE.Object3D, axis: "x" | "y" | "z"): "x" | "y" | "z" {
+    const m = new THREE.Matrix4();
+    for (let n: THREE.Object3D | null = holder; n && n !== v.group; n = n.parent) {
+      if (n.matrixAutoUpdate) n.updateMatrix();
+      m.premultiply(n.matrix);
+    }
+    const want = { x: 0, y: 1, z: 2 }[axis];
+    const e = m.elements;
+    const along = (column: number) => Math.abs(e[column * 4 + want]) / Math.hypot(e[column * 4], e[column * 4 + 1], e[column * 4 + 2]);
+    const best = [0, 1, 2].reduce((a, b) => (along(b) > along(a) ? b : a));
+    return (["x", "y", "z"] as const)[best];
+  }
+
+  /** A vehicle part's matrix in game.world's frame: the vehicle's pose times the part's chain of attachment matrices. */
+  private partMatrix(v: Visual, object: THREE.Object3D): THREE.Matrix4 {
+    const m = new THREE.Matrix4();
+    for (let n: THREE.Object3D | null = object; n && n !== v.group; n = n.parent) {
+      if (n.matrixAutoUpdate) n.updateMatrix();
+      m.premultiply(n.matrix);
+    }
+    v.group.updateMatrix();
+    return m.premultiply(v.group.matrix);
   }
 
   private build(model: string): THREE.Mesh | null {
@@ -294,6 +350,7 @@ export class MissionObjects {
   dispose() {
     for (const v of this.visuals) {
       v.collider?.remove();
+      for (const part of v.parts ?? []) part.collider?.remove();
       v.group.removeFromParent();
       this.game.entities.remove(v.entity.id);
     }

@@ -94,7 +94,7 @@ class AiSystem implements AiService, AiWorld {
   private unsubscribe: (() => void)[] = [];
   private markers = new Map<Soldier, THREE.Mesh>();
   private pending: CharacterSpec[] = [];
-  private generators: { spec: CharacterSpec; spawned: number; last: number; copies: Soldier[] }[] = [];
+  private generators: { spec: CharacterSpec; spawned: number; copies: Soldier[] }[] = [];
   private pollTimer = 0;
   private frustum = new THREE.Frustum();
   private viewProjection = new THREE.Matrix4();
@@ -140,7 +140,7 @@ class AiSystem implements AiService, AiWorld {
     // Characters inside ConditionalContainers wait for them to run (checked through the mission system once it is
     // up); GuardGenerator templates spawn copies while their generator's condition holds.
     for (const spec of wanted) {
-      if (spec.generator) this.generators.push({ spec, spawned: 0, last: -Infinity, copies: [] });
+      if (spec.generator) this.generators.push({ spec, spawned: 0, copies: [] });
       else if (spec.gates.length) this.pending.push(spec);
       else this.add(spec);
     }
@@ -458,15 +458,16 @@ class AiSystem implements AiService, AiWorld {
     for (const g of this.generators) {
       const gen = g.spec.generator!;
       if (g.spawned >= gen.maxSpawns || !gatesOpen(g.spec, test) || !test(gen.condition, gen.taskId)) continue;
-      // One guard at a time: the next comes when the last is down or a few seconds have passed.
-      if (g.copies.some((c) => c.alive) && this.game.time - g.last < 8) continue;
+      // One guard at a time: a generator replaces its guard only once the last copy is dead (or gone with its
+      // container). Level 10's T80 comes at "nSpawns == 2" (a trooper was killed and replaced), and level 6's
+      // generators ("!AreaActivate.nActive && Door.isClosed") refill a building out of sight rather than grow it.
+      if (g.copies.some((c) => c.alive && this.soldiers.includes(c))) continue;
       const copy = this.add({ ...g.spec, taskId: g.spawned === 0 ? g.spec.taskId : -1 });
       if (g.spec.gates.length) this.gated.add(copy);
       copy.lastKnown = this.game.services.player ? [...this.game.services.player.entity.position] : null;
       if (this.alarmOn) copy.post("AIEVENT_ALARMON");
       g.copies.push(copy);
       g.spawned++;
-      g.last = this.game.time;
     }
   }
 
