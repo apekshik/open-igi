@@ -8,7 +8,7 @@ import { NO_MATERIAL, type ModelCollision } from "../../formats/collision.ts";
 import type { TerrainData } from "../../level/terrain.ts";
 import { TRI_HULL, TRI_MOVE, TRI_RAY, TRI_SIGHT, TRI_THIN, TriangleBvh, triangleNormal } from "./bvh.ts";
 import type { GameMaterial } from "./materials.ts";
-import { TerrainCollider, type TerrainDiscard } from "./terrain.ts";
+import { TerrainCollider } from "./terrain.ts";
 
 const METRE = 4096;
 
@@ -51,8 +51,6 @@ export interface WorldOptions {
   terrainGameMaterials?: number[];
   materials: GameMaterial[];
   objects: StaticObjectInput[];
-  /** DiscardTerrain tasks: octree cubes with no terrain surface. */
-  discards?: TerrainDiscard[];
 }
 
 export interface WorldHit {
@@ -182,7 +180,7 @@ export class CollisionWorld {
     this.origin = options.origin;
     this.materials = options.materials;
     this.objects = options.objects;
-    this.terrain = options.terrain ? new TerrainCollider(options.terrain, options.origin, options.terrainGameMaterials, options.discards) : null;
+    this.terrain = options.terrain ? new TerrainCollider(options.terrain, options.origin, options.terrainGameMaterials) : null;
 
     const { soup, hitTriangles, hullTriangles, skipped, ranges } = buildSoup(options.objects, this.materials);
     this.ranges = ranges;
@@ -721,7 +719,9 @@ function buildSoup(objects: StaticObjectInput[], gameMaterials: GameMaterial[]) 
           // hull exists, the real shape still keeps the capsule's core out (details the coarse hull leaves out,
           // such as furniture inside an open doorway), with a thin radius.
           if (material !== 0 && !opening && !info?.passThrough) fl |= hasHull ? TRI_MOVE | TRI_THIN : TRI_MOVE;
-          else if (!hasHull && material !== 0) fl |= TRI_MOVE;
+          // Openings never block: a capsule only fits through door-sized ones (level12's tunnel shells close each
+          // end with an opening group, which used to wall off every tunnel joint).
+          else if (!hasHull && material !== 0 && !opening) fl |= TRI_MOVE;
           flags[n] = fl;
           hitTriangles++;
         }

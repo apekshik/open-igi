@@ -94,6 +94,19 @@ export abstract class LogicTask {
   /** The task stopped being active (its container stopped). */
   deactivate(): void {}
 
+  /** Plain-data fields as constructed (numbers, strings, booleans, arrays of them), for restart(). */
+  private initial: [string, unknown][] = [];
+
+  /** Remember the freshly constructed state. Called once by MissionLogic after every task exists. */
+  snapshot() {
+    this.initial = Object.entries(this).filter(([k, v]) => k !== "initial" && k !== "active" && isPlainData(v)).map(([k, v]) => [k, structuredClone(v)]);
+  }
+
+  /** Back to the constructed state: the engine restarts a ConditionalContainer's contents from scratch. */
+  restart() {
+    for (const [k, v] of this.initial) (this as Record<string, unknown>)[k] = structuredClone(v);
+  }
+
   protected expr(param: string): Expr {
     return this.L.compile(pstr(this.node, param), this.key, param);
   }
@@ -115,6 +128,11 @@ export interface Usable {
   useText(): string;
   /** Called when the use completes (immediately for instant uses). `user` is the entity id. */
   use(user: number | null): void;
+}
+
+function isPlainData(v: unknown): boolean {
+  if (v === null || ["number", "string", "boolean", "undefined"].includes(typeof v)) return true;
+  return Array.isArray(v) && v.every((x) => x === null || ["number", "string", "boolean"].includes(typeof x));
 }
 
 export function isUsable(t: LogicTask): t is LogicTask & Usable {
@@ -195,6 +213,7 @@ export class MissionLogic {
       this.byNode.set(node, t);
       if (node.id >= 0 && !this.byKey.has(t.key)) this.byKey.set(t.key, t);
     }
+    for (const t of this.tasks) t.snapshot();
     this.updateActive();
   }
 
@@ -363,6 +382,17 @@ export class MissionLogic {
       for (const c of node.children) visit(c, childActive);
     };
     for (const r of this.tree.roots) visit(r, true);
+  }
+
+  /** Reset every task below `node` to its constructed state (a ConditionalContainer starting again). */
+  restartSubtree(node: TaskNode) {
+    const visit = (n: TaskNode) => {
+      for (const c of n.children) {
+        this.byNode.get(c)?.restart();
+        visit(c);
+      }
+    };
+    visit(node);
   }
 
   /** Is the HumanPlayer task active (the player exists in the level)? False during intro/outro cutscenes. */
@@ -573,6 +603,8 @@ class EntityTask extends LogicTask {
 
 export class ConditionalContainerTask extends LogicTask {
   running = false;
+  /** Has run before: starting again restarts everything inside from its initial state. */
+  private ran = false;
   private condition = this.expr("Condition");
   private start = this.expr("Run at start");
   private stop = this.expr("Run at stop");
@@ -585,6 +617,8 @@ export class ConditionalContainerTask extends LogicTask {
     const run = this.test(this.condition);
     if (run === this.running) return;
     this.running = run;
+    if (run && this.ran) this.L.restartSubtree(this.node);
+    if (run) this.ran = true;
     const e = run ? this.start : this.stop;
     if (e) this.L.eval(e, this);
   }
@@ -1094,12 +1128,16 @@ export class DoorTask extends ObjectTask implements Usable {
   }
   /** Door model transform at an opening (default: the current one): slide along local X/Y or swing about Z by Max angle. */
   pose(f = this.open): { position: Vec3; orientation: Vec3 } {
-    const g = this.orientation[2];
-    const c = Math.cos(g);
-    const s = Math.sin(g);
+    // The slide is along the model's local X/Y, so it turns with the full orientation (Euler ZYX, as the model is
+    // drawn), not just the heading: level12's blast doors (506_01_1) are tipped 90 degrees about Y and slide up.
+    const [a, b, g] = this.orientation;
+    const [sx, sy] = this.slide;
+    const y1 = sy * Math.cos(a), z1 = sy * Math.sin(a);
+    const x2 = sx * Math.cos(b) + z1 * Math.sin(b), z2 = -sx * Math.sin(b) + z1 * Math.cos(b);
+    const dx = x2 * Math.cos(g) - y1 * Math.sin(g), dy = x2 * Math.sin(g) + y1 * Math.cos(g);
     const base = this.worldPosition();
-    const position: Vec3 = [base[0] + (this.slide[0] * c - this.slide[1] * s) * f, base[1] + (this.slide[0] * s + this.slide[1] * c) * f, base[2]];
-    return { position, orientation: [this.orientation[0], this.orientation[1], g + this.maxAngle * f] };
+    const position: Vec3 = [base[0] + dx * f, base[1] + dy * f, base[2] + z2 * f];
+    return { position, orientation: [a, b, g + this.maxAngle * f] };
   }
 }
 

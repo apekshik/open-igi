@@ -11,7 +11,8 @@
     "inventory": "node --experimental-strip-types tools/inventory.ts",
     "chunks": "node --experimental-strip-types tools/chunks.ts",
     "qvm": "node --experimental-strip-types tools/qvm.ts",
-    "collision": "node --experimental-strip-types tools/collision.ts"
+    "collision": "node --experimental-strip-types tools/collision.ts",
+    "test": "node --experimental-strip-types --no-warnings --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "fflate": "^0.8.3",

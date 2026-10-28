@@ -3,8 +3,6 @@
 
 import { decodeCollision, type ModelCollision } from "../../formats/collision.ts";
 import { readRes } from "../../formats/ilff.ts";
-import type { QvmCall, QvmValue } from "../../formats/qvm.ts";
-import type { TerrainDiscard } from "./terrain.ts";
 import type { LoadedLevel } from "../../level/load.ts";
 import type { Placement } from "../../level/objects.ts";
 import type { Vfs } from "../../vfs/vfs.ts";
@@ -59,23 +57,7 @@ export async function buildCollisionWorld(vfs: Vfs, level: LoadedLevel, origin: 
     if (!collision || (!collision.hit && !collision.human)) continue;
     objects.push({ model: p.placement.model, collision, matrix: p.matrix ?? placementMatrix(p.placement, origin), gates: p.placement.gates });
   }
-  return new CollisionWorld({ origin, terrain: level.terrain.data, terrainGameMaterials, materials, objects, discards: terrainDiscards(level.statements) });
-}
-
-/** DiscardTerrain(position, level) tasks anywhere in objects.qvm. */
-export function terrainDiscards(statements: QvmCall[]): TerrainDiscard[] {
-  const out: TerrainDiscard[] = [];
-  const visit = (t: QvmValue) => {
-    if (typeof t !== "object" || !("fn" in t) || t.fn !== "Task_New") return;
-    const [, type, , ...rest] = t.args;
-    if (type === "DiscardTerrain") {
-      const [x, y, z, level] = rest;
-      if ([x, y, z, level].every((v) => typeof v === "number")) out.push({ position: [x, y, z] as [number, number, number], level: level as number });
-    }
-    rest.forEach(visit);
-  };
-  statements.forEach(visit);
-  return out;
+  return new CollisionWorld({ origin, terrain: level.terrain.data, terrainGameMaterials, materials, objects });
 }
 
 /**

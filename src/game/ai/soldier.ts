@@ -14,7 +14,7 @@ import type { QvmScript } from "../../formats/qvm.ts";
 import { direction, METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Entity } from "../entity.ts";
 import type { Game } from "../game.ts";
-import { cycleVelocity } from "../player/animator.ts";
+import { ANIM_TICKS_PER_SECOND, cycleVelocity } from "../player/animator.ts";
 import type { AiCharacter, AiEvent, AiState } from "./api.ts";
 import type { SoldierBody } from "./body.ts";
 import type { AiConfig, CharacterSpec, PatrolCommand } from "./level.ts";
@@ -111,6 +111,9 @@ interface Action {
 /** Events that mean the character knows there is an enemy about. */
 const THREAT = /GUNSHOT|DAMAGE|EXPLOSION|GRENADE|FLASHBANG|ENEMY|ALERT|COMBAT/;
 
+/** Shortest pause between combat moves, seconds, whatever the config says. */
+const MIN_MOVE_DELAY = 1;
+
 const rand = Math.random;
 const pick = <T>(list: readonly T[]) => list[Math.floor(rand() * list.length)];
 const yawTo = (from: Vec3, to: Vec3) => Math.atan2(-(to[0] - from[0]), to[1] - from[1]);
@@ -187,7 +190,7 @@ export class Soldier implements AiCharacter {
   private baseClip: number = CLIP.idle;
   private lastHeard = -Infinity;
   /** A clip that plays to its end before the base clip resumes (stance changes, rolls, hit reactions). */
-  private oneShot: { id: number; then?: () => void } | null = null;
+  private oneShot: { id: number; then?: () => void; left: number } | null = null;
   private suspicious = 0;
 
   constructor(world: AiWorld, spec: CharacterSpec, body: SoldierBody | null, config: AiConfig, weapon: WeaponInfo | null) {
@@ -258,16 +261,22 @@ export class Soldier implements AiCharacter {
     const scriptAssign = (name: string, value: ScriptValue) => mission?.assign?.(name, Number(value) || 0);
     const level = this.world.script(this.aiId);
     const common = this.world.commonScript(this.aiType);
-    const natives = this.natives(queued, common, scriptVariable);
+    const natives = this.natives(queued, common, scriptVariable, scriptAssign);
+    // Without a level script the common script runs through DefaultHandler, which guards against recursion.
     if (level) runScript(level, natives, scriptVariable, scriptAssign);
-    else if (common) runScript(common, natives, scriptVariable, scriptAssign);
     else natives.AIFunction_DefaultHandler();
   }
 
   /** The engine side of the scripts: AIFunction_* queries/settings and AIAction_* actions. */
-  private natives(queued: Action[], common: QvmScript | null, variable: (name: string) => ScriptValue): ScriptNatives {
+  private natives(
+    queued: Action[],
+    common: QvmScript | null,
+    variable: (name: string) => ScriptValue,
+    assign: (name: string, value: ScriptValue) => void,
+  ): ScriptNatives {
     const n = (v: ScriptValue | undefined) => (typeof v === "number" ? v : 0);
-    // The common script can itself fall back on the default handler (e.g. for AIEVENT_DOOR): then use the built-in one.
+    // A DefaultHandler call from inside the common script means the engine's built-in handling, not the common
+    // script again (that would recurse until the stack overflowed).
     let inCommon = false;
     const natives: ScriptNatives = {
       AIFunction_GetCurrentEventType: () => this.event,
@@ -275,12 +284,11 @@ export class Soldier implements AiCharacter {
         if (common && !inCommon) {
           inCommon = true;
           try {
-            runScript(common, natives, variable);
+            runScript(common, natives, variable, assign);
           } finally {
             inCommon = false;
           }
-        }
-        else if (this.event === "AIEVENT_IDLE") queued.push(idle(2));
+        } else if (this.event === "AIEVENT_IDLE") queued.push(idle(2));
         else if (this.event === "AIEVENT_DEAD") queued.push(dead());
         else if (/ENEMYDETECTION|GUNSHOT|TAKINGDAMAGE|ALERT/.test(this.event)) this.pendingCombat = true;
         else if (this.event === "AIEVENT_COMBAT") queued.push(combat());
@@ -417,7 +425,10 @@ export class Soldier implements AiCharacter {
   private animate(dt: number) {
     const b = this.body;
     if (!b) return;
-    if (this.oneShot && b.clips.clipId === this.oneShot.id && b.clips.finished) {
+    // Some skeletons flag their stance transitions as looping (level13's 018_01_1: 7 stand-to-crouch, 19
+    // crouch-to-stand), so a one-shot also ends after one run of its clip; otherwise the soldier stayed busy forever and
+    // never fired again.
+    if (this.oneShot && b.clips.clipId === this.oneShot.id && (b.clips.finished || (this.oneShot.left -= dt) <= 0)) {
       const then = this.oneShot.then;
       this.oneShot = null;
       then?.();
@@ -443,7 +454,7 @@ export class Soldier implements AiCharacter {
       then?.();
       return;
     }
-    this.oneShot = { id: clip, then };
+    this.oneShot = { id: clip, then, left: this.body.clips.clip(clip)!.duration / ANIM_TICKS_PER_SECOND };
     this.body.clips.play(clip);
   }
 
@@ -1087,7 +1098,9 @@ class CombatAction implements Action {
 
     // Movement: close in on a hidden or distant target, or dodge.
     if (!s.busyAnimating && !s.moving && (this.moveTimer -= dt) <= 0 && this.burstLeft === 0) {
-      this.moveTimer = c.moveDelay * (0.5 + rand());
+      // settings.qvm gives AITYPE_SPETNAZ_PATROL_AK at GD_2 (level13's surface guards) a move delay of 0: with no floor
+      // they picked a new move or evasive roll every free frame and never fired.
+      this.moveTimer = Math.max(MIN_MOVE_DELAY, c.moveDelay * (0.5 + rand()));
       this.decideMove(s, target, d);
     }
     if (s.moving) {

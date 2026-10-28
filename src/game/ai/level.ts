@@ -85,7 +85,8 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
     if (t === "AIGraph") graphs.set(tid, [num(params[0]), num(params[1]), num(params[2])]);
     else if (t === "AlarmControl") alarms.set(tid, [num(params[0]), num(params[1]), num(params[2])]);
     else if (t === "PatrolPath") sharedPatrols.set(tid, patrolCommands(children));
-    else if (t === "HumanSoldier") {
+    // Ekk and Anya (level14) are HumanSoldierFemale tasks, with the same parameters as HumanSoldier.
+    else if (t === "HumanSoldier" || t === "HumanSoldierFemale") {
       characters.push({ ...character(tid, String(name), params, children, scripted), gates, generator });
       return;
     }

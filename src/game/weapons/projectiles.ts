@@ -1,5 +1,6 @@
 // Thrown and launched weapons: hand grenades and flashbangs (bouncing, timed fuse), proximity mines (arm, sense,
-// count down) and LAW 80 / vehicle missiles (straight flight, explode on contact).
+// count down), LAW 80 / vehicle missiles (straight flight, explode on contact) and M203 grenades (ballistic, explode
+// on contact).
 import * as THREE from "three";
 import { METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Game } from "../game.ts";
@@ -17,7 +18,7 @@ export interface ProjectileHooks {
 }
 
 export interface Projectile {
-  kind: "grenade" | "flashbang" | "mine" | "missile";
+  kind: "grenade" | "flashbang" | "mine" | "missile" | "m203";
   weapon: string;
   ownerId: number | null;
   position: Vec3;
@@ -70,9 +71,10 @@ export class Projectiles {
       if (p.state === "resting") continue;
       if (p.kind !== "missile") p.velocity[2] -= GRAVITY * dt;
       const next = vec3.add(p.position, vec3.scale(p.velocity, dt));
-      const hit = physics?.raycast(p.position, next, { ignoreEntity: p.ownerId ?? undefined, entities: p.kind === "missile" });
+      const impact = p.kind === "missile" || p.kind === "m203";
+      const hit = physics?.raycast(p.position, next, { ignoreEntity: p.ownerId ?? undefined, entities: impact });
       if (hit) {
-        if (p.kind === "missile") {
+        if (impact) {
           p.position = hit.point;
           this.remove(p);
           this.hooks.explode(p);
@@ -91,14 +93,14 @@ export class Projectiles {
         }
       } else {
         p.position = next;
-        if (p.kind === "missile" && (p.timer -= dt) <= 0) {
+        if ((p.kind === "missile" || p.kind === "m203") && (p.timer -= dt) <= 0) {
           this.remove(p);
           this.hooks.explode(p);
           continue;
         }
       }
       p.object.position.copy(this.game.local(p.position));
-      if (p.kind === "missile") {
+      if (p.kind === "missile" || p.kind === "m203") {
         // Nose (+Y in the model) along the flight direction.
         const d = vec3.normalize(p.velocity);
         p.object.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...d));

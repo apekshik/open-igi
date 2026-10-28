@@ -18,6 +18,8 @@ const GUN_BONE = 3;
 const PART_BONES = [52, 55];
 /** Draw order for the view model: after everything else, including transparent world objects. */
 const VIEW_ORDER = 1_000_000;
+/** Self-light of the view model as a fraction of its texture colour (see viewMaterial). */
+const VIEW_SELF_LIGHT = 0.4;
 const BLEND_TIME = 0.12;
 
 /** An attachment point in a .mef (ATTA chunk): 68-byte records of name[16], vec3 position, 3x3 rotation, pad. */
@@ -74,6 +76,12 @@ function blendBones(a: Float32Array, b: Float32Array, f: number, out: Float32Arr
 /** Material copies for the view model: drawn last, in the transparent pass, after a depth clear. */
 function viewMaterial(m: THREE.Material): THREE.Material {
   const c = m.clone();
+  // The arms and gun sit at the eye, so the world's sun often lights them from behind and they turn into a black
+  // silhouette. Give them a floor of their own texture as self-light, like IGI's evenly lit first-person weapons.
+  if (c instanceof THREE.MeshLambertMaterial && c.map) {
+    c.emissiveMap = c.map;
+    c.emissive.setScalar(VIEW_SELF_LIGHT);
+  }
   c.transparent = true;
   c.depthWrite = true;
   c.side = THREE.FrontSide;

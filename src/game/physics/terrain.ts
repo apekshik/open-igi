@@ -8,7 +8,7 @@
 // Walk conventions are shared with src/level/terrain.ts; the GetZ order follows hjcminus/Project-IGI-Terrain
 // (MIT, source/level/terrain.cpp), see THIRD_PARTY.md.
 
-import { CHILD_FOR_OCTANT, COMPOSE, cubeMinAt, LEAF_LEVEL, OCTANT, ROOT_HALF, type HeightPatch, type TerrainData, type TextureModifier } from "../../level/terrain.ts";
+import { CHILD_FOR_OCTANT, COMPOSE, discardedCubes, LEAF_LEVEL, OCTANT, ROOT_HALF, type HeightPatch, type TerrainData, type TextureModifier } from "../../level/terrain.ts";
 import { rayTriangle } from "./bvh.ts";
 
 const LEAF_SIZE = 2 * (ROOT_HALF / 2 ** LEAF_LEVEL);
@@ -35,12 +35,6 @@ export interface TerrainGround {
   material: number;
 }
 
-/** A DiscardTerrain task: the octree cube at `level` containing `position` has no terrain (building pits, shafts). */
-export interface TerrainDiscard {
-  position: [number, number, number];
-  level: number;
-}
-
 interface Stacks {
   patch: HeightPatch | null;
   modifiers: TextureModifier[];
@@ -57,6 +51,8 @@ export class TerrainCollider {
   private data: TerrainData;
   private origin: [number, number, number];
   private tasks = new Map<string, CubeTasks>();
+  /** DiscardTerrain cubes (tunnel mouths, bunkers): no collision inside them. */
+  private discarded: Set<string>;
   private columns = new Map<number, TerrainColumn>();
   // Scratch for one leaf mesh (at most 64 vertices: 6-bit indices).
   private vx = new Float64Array(64);
@@ -67,15 +63,9 @@ export class TerrainCollider {
 
   /** `gameMaterials[terrainMaterial]` = game material id (terrain.qvm CreateTerrainMaterial's second argument). */
   readonly gameMaterials: number[];
-  /** Cubes removed by DiscardTerrain tasks (cubeKey of level and min corner): no surface inside them. */
-  private discarded = new Set<string>();
 
-  constructor(data: TerrainData, origin: [number, number, number], gameMaterials: number[] = [], discards: TerrainDiscard[] = []) {
+  constructor(data: TerrainData, origin: [number, number, number], gameMaterials: number[] = []) {
     this.gameMaterials = gameMaterials;
-    for (const d of discards) {
-      const [x, y, z] = cubeMinAt(d.position, d.level);
-      this.discarded.add(cubeKey(d.level, x, y, z));
-    }
     this.data = data;
     this.origin = origin;
     this.dv = new DataView(data.cmd.buffer, data.cmd.byteOffset, data.cmd.byteLength);
@@ -87,6 +77,13 @@ export class TerrainCollider {
     };
     for (const p of data.patches) slot(p).patches.push(p);
     for (const m of data.modifiers) slot(m).modifiers.push(m);
+    this.discarded = discardedCubes(data);
+  }
+
+  private isDiscarded(level: number, c: number[]): boolean {
+    if (!this.discarded.size) return false;
+    const half = ROOT_HALF / 2 ** level;
+    return this.discarded.has(cubeKey(level, c[0] - half, c[1] - half, c[2] - half));
   }
 
   /** Game material id of a terrain material (Ground, Snow, ...), or -1 if unknown. */
@@ -152,13 +149,6 @@ export class TerrainCollider {
   /** Terrain surface under (x, y), as the engine's GetZ: the top surface, ignoring any height limit. */
   ground(x: number, y: number): TerrainGround | null {
     return this.getZ(1, 0, 0, 0, 0, 0, { patch: null, modifiers: [] }, x, y);
-  }
-
-  /** Is the cube centred at c (level) removed by a DiscardTerrain task? */
-  private isDiscarded(level: number, c: number[]): boolean {
-    if (!this.discarded.size) return false;
-    const half = ROOT_HALF / 2 ** level;
-    return this.discarded.has(cubeKey(level, c[0] - half, c[1] - half, c[2] - half));
   }
 
   private getZ(index: number, cx: number, cy: number, cz: number, level: number, t: number, parent: Stacks, x: number, y: number): TerrainGround | null {

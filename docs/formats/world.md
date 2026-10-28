@@ -102,3 +102,18 @@ off at `cutoff x r'`.
   track); flipped trains count from the far end. A train whose `AnimTask` has the run condition `"1"` starts moving at
   load; others wait for a script (`WorldService.train(id).running = true`). Thrust read as m/s², MaxSpeed as km/h.
   The AnimTask key data (which probably drives thrust) is not decoded.
+
+## Terrain holes and level 14 (confirmed / open)
+
+- **`DiscardTerrain(Position, Level)`** (levels 3, 5-9, 11-13; 22 in level 12): the terrain cube at octree `Level`
+  containing `Position` is skipped, with its subtree, when the walk descends into it, for drawing and for collision.
+  This matches hjcminus/Project-IGI-Terrain (`Terrain::LoadDiscardTerrainInfo`, `CUBE_FLAG_DISCARD_TERRAIN`). Without
+  it, level 12's tunnels are cut by the mountain surface. A cube drawn at a coarser level of detail than the discard
+  keeps its mesh, as in the engine.
+- **Level 14** `.ctr` has 44-byte records (flawme/igi-reverse-engineering, docs 16): the first 25 bytes are the
+  usual children/transforms/mask, `+0x24` holds the constant `ef ff ff ff 5f fe ff 07`, `+0x28` counts up by 16 per
+  record, and there is no `.cmd` offset. Its `.cmd` is a linear run of 4,779 meshes for 11,055 cubes; how a cube
+  finds its mesh is not known yet, so level 14 loads without terrain (its gameplay is indoors; the intro's
+  outdoor shots show no ground).
+- Level 12's tunnel shells (`430_01_1`) close both ends with an *opening* collision group (`link` >= 0, no material).
+  Openings never block movement (a capsule only fits through door-sized ones).

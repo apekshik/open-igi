@@ -10,6 +10,8 @@ import { KeyBindings } from "./controls.ts";
 import { Button, COLORS, Label, ListBox, MenuCanvas, Picture, ProgressBar, Slider, TextBlock, Toggle, Widget, type MenuTheme, type Page, type Rect } from "./menu.ts";
 import { missionBriefing, missionCatalog, type MissionEntry } from "./missions.ts";
 import { applySettings, defaultSettings, DETAIL_LEVELS, loadSettings, missionsUnlocked, saveSettings, unlockMission, type Settings } from "./settings.ts";
+import { PerfOverlay } from "./perf.ts";
+import { PointerFlow, type FlowEvent } from "./pointer.ts";
 import { MenuAudio } from "./sound.ts";
 
 const MENU_RES = "menusystem/menusystem.res";
@@ -48,6 +50,12 @@ export class FrontEnd {
   private state: State = "menu";
   private stats: Stats = { shots: 0, hits: 0, kills: 0, alarms: 0 };
   private mapWasOpen = false;
+  /** A mission:end waiting to be shown: after a short delay, and only once the outro cutscene has played out. */
+  private pendingEnd: { success: boolean; reason: string; wait: number } | null = null;
+  private flow = new PointerFlow();
+  /** "Click to capture the mouse", shown while playing without pointer lock. */
+  private hint = document.createElement("div");
+  private perf: PerfOverlay;
   private menuOpenedAt = 0;
   private loadToken = 0;
   private cleanup: (() => void)[] = [];
@@ -62,9 +70,27 @@ export class FrontEnd {
     this.gameHost.style.cssText = "position:absolute;inset:0";
     this.root.append(this.gameHost);
     host.append(this.root);
-    const onLock = () => this.pointerLockChanged();
-    document.addEventListener("pointerlockchange", onLock);
-    this.cleanup.push(() => document.removeEventListener("pointerlockchange", onLock));
+    this.hint.style.cssText =
+      "position:absolute;left:50%;top:58%;transform:translateX(-50%);padding:4px 10px;background:rgba(0,0,0,0.55);" +
+      `color:${COLORS.hover};font:13px/1.4 ui-monospace,Consolas,monospace;pointer-events:none;display:none;z-index:5`;
+    this.hint.textContent = "Click to capture the mouse";
+    this.root.append(this.hint);
+    const listen = (target: EventTarget, type: string, fn: () => void) => {
+      target.addEventListener(type, fn);
+      this.cleanup.push(() => target.removeEventListener(type, fn));
+    };
+    listen(document, "pointerlockchange", () => this.flowEvent({ type: document.pointerLockElement ? "locked" : "unlocked" }));
+    listen(document, "pointerlockerror", () => this.flowEvent({ type: "lockError" }));
+    listen(window, "blur", () => this.flowEvent({ type: "blur" }));
+    listen(document, "visibilitychange", () => document.hidden && this.flowEvent({ type: "blur" }));
+    this.perf = new PerfOverlay(this.root);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "F3") return;
+      e.preventDefault();
+      this.perf.toggle();
+    };
+    addEventListener("keydown", onKey);
+    this.cleanup.push(() => removeEventListener("keydown", onKey));
   }
 
   async start(level?: string) {
@@ -362,20 +388,23 @@ export class FrontEnd {
     ];
     this.menu.show({ background, panel, widgets });
 
-    // Game.start reports its steps; turn them into a rough progress fraction.
+    // Game.start reports each step with its fraction; the bar eases towards it and creeps a little within a long step.
     let target = 0.02;
-    const creep = setInterval(() => (bar.value += (target - bar.value) * 0.15), 50);
-    const onProgress = (text: string) => {
-      this.status(text);
-      if (/^loading/.test(text)) target = 0.1;
-      else if (/placing/.test(text)) target = 0.45;
-      else if (/^starting/.test(text)) target = Math.min(0.85, Math.max(target, 0.5) + 0.04);
-      else if (/terrain/.test(text)) target = 0.9;
-      else if (text === "") target = 1;
+    let next = 0.1;
+    const creep = setInterval(() => {
+      target = Math.min(next - 0.01, target + 0.002);
+      bar.value += (target - bar.value) * 0.25;
+    }, 50);
+    const onProgress = (text: string, fraction = target) => {
+      statusLabel.text = text ? `${this.t("LoadingText", "Loading Level... Please Wait...")}  ${text}` : statusLabel.text;
+      target = Math.max(target, fraction);
+      next = Math.min(1, target + 0.12);
+      if (fraction >= 1) bar.value = 1;
     };
 
     const params = new URLSearchParams(location.search);
     this.stats = { shots: 0, hits: 0, kills: 0, alarms: 0 };
+    this.pendingEnd = null;
     let game: Game;
     try {
       game = await Game.start({
@@ -430,14 +459,24 @@ export class FrontEnd {
             if (e.entityId === player()) setTimeout(() => game === fe.game && fe.gameOver(), 2500);
           }),
           game.events.on("alarm", (e) => e.active && fe.stats.alarms++),
-          game.events.on("mission:end", (e) => setTimeout(() => game === fe.game && fe.missionEnd(e.success, e.reason), e.success ? 1500 : 2500)),
+          // LevelFlow can complete before the outro ends (level12 completes on its first of three outro cutscenes).
+          game.events.on("mission:end", (e) => (fe.pendingEnd = { success: e.success, reason: e.reason, wait: e.success ? 1.5 : 2.5 })),
         ];
       },
-      lateUpdate(_dt, game) {
+      lateUpdate(dt, game) {
         if (game !== fe.game) return;
+        const end = fe.pendingEnd;
+        if (end && (end.wait -= dt) <= 0 && !game.services.mission?.cutscene()) {
+          fe.pendingEnd = null;
+          fe.missionEnd(end.success, end.reason);
+        }
         const mapOpen = game.services.hud?.mapOpen ?? false;
-        if (fe.state === "playing" && !mapOpen && !fe.mapWasOpen && game.input.wasPressed("pause")) fe.pause();
+        // The key that closed the map this frame must not also pause.
+        if (!mapOpen && !fe.mapWasOpen && game.input.wasPressed("pause")) fe.flowEvent({ type: "pauseKey", now: performance.now() });
+        if (mapOpen !== fe.mapWasOpen) fe.flowEvent({ type: "map", open: mapOpen });
         fe.mapWasOpen = mapOpen;
+        fe.hint.style.display = fe.flow.hint && fe.state === "playing" ? "block" : "none";
+        fe.perf.frame(game, !mapOpen);
       },
       dispose() {
         for (const off of offs) off();
@@ -445,12 +484,13 @@ export class FrontEnd {
     };
   }
 
-  private pointerLockChanged() {
-    const game = this.game;
-    if (!game || this.state !== "playing" || game.input.locked) return;
-    if (game.services.hud?.mapOpen || this.mapWasOpen) return;
-    // Esc releases the mouse before the page sees the key: treat losing the pointer as the pause key.
-    this.pause();
+  /** Feed the pointer/pause state machine (src/ui/pointer.ts) and carry out what it asks for. */
+  private flowEvent(e: FlowEvent) {
+    for (const command of this.flow.handle(e)) {
+      if (command === "lock") this.game?.input.lock();
+      else if (command === "unlock") this.game?.input.unlock();
+      else this.pause();
+    }
   }
 
   private resume() {
@@ -461,15 +501,17 @@ export class FrontEnd {
     this.status("");
     game.paused = false;
     if (game.services.player) game.services.player.frozen = false;
-    game.input.lock();
+    this.flowEvent({ type: "resume", now: performance.now() });
   }
 
   private pause() {
     const game = this.game;
     if (!game || this.state !== "playing") return;
+    this.flow.handle({ type: "stop" });
     this.state = "paused";
     game.paused = true;
     game.input.unlock();
+    this.hint.style.display = "none";
     this.menuOpenedAt = performance.now();
     this.pauseMenu();
   }
@@ -509,6 +551,8 @@ export class FrontEnd {
 
   private disposeGame() {
     this.loadToken++;
+    this.flow.handle({ type: "stop" });
+    this.hint.style.display = "none";
     if (!this.game) return;
     this.game.input.unlock();
     this.game.dispose();
@@ -520,6 +564,10 @@ export class FrontEnd {
     const game = this.game;
     if (!game) return;
     this.state = "over";
+    this.flow.handle({ type: "stop" });
+    this.hint.style.display = "none";
+    // Messages and the compass would show through the end screen's panel.
+    if (game.services.hud) game.services.hud.visible = false;
     game.paused = true;
     game.input.unlock();
     const p = INGAME_PANEL;
