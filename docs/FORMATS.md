@@ -229,6 +229,31 @@ it add `(bilinear(h) - 64) * 256` to their vertex heights.
 **Check:** with patches applied, Mission 1's 400 placed objects sit a median 0.00 m above the decoded ground
 (10th–90th percentile: -0.5 m to +2.3 m).
 
-Not yet used: `.lmp` (8-bit lightmaps: repeated `u32 size, u8[size²]`), `terrain.tex` (LOOP v9, 18 textures of
-128×128 ARGB1555), `.bit` (texture-modifier bitmaps, same slot table as `.hmp` but 1 bit per cell), and
-`terrain.qvm` (`CreateTerrainMaterial` and tile-map tables).
+**Level of detail.** A cube at level L is drawn (instead of its children) once its face distance (Chebyshev,
+view to nearest face) reaches `163 * 2^(25-L)`; leaves (L=16) are always drawn. Within a cube, each child vertex
+(the `.cmd` vertices after the parent ones; low 6 bits = its parent vertex) slides onto its parent vertex by
+`factor = clamp(d / (2^(25-L) * 99) - 227/99, 0, 1)`, where d is its parent vertex's Chebyshev distance to the view.
+That closes cracks between neighbouring cubes at different levels. open-igi divides distances by a `detail`
+multiplier (default 4; `?detail=1` matches the game).
+
+### Texturing
+
+| file / task | contents |
+|---|---|
+| `terrain.tex` | LOOP v9: 18 images, 128×128 ARGB1555 (52-byte header, 32-byte image descriptors) |
+| `terrain.qvm` | `CreateTerrainMaterial(m, id, 32 × {bool, v1, v2, freq2, tileMap2, freq1, tileMap1})` per material and octree level; `CreateTerrainTileMap(g, 64 texture indices)` (8×8) |
+| `.bit` | same 256-slot table as `.hmp`; each slot a size×size 1-bit mask |
+| `TextureModifier` task | x, y, z, level, material, bitmap slot, size, isEdit: paints `material` where the mask is set, over the level-`level` cube containing the position |
+| `.lmp` | back-to-back `u32 size, u8[size²]` greyscale lightmaps (268 in Mission 1) |
+| `TerrainLightMap` task | x, y, z, level, size, lmp index, generated: lightmap spanning the level-`level` cube |
+
+Per vertex, the material is the first modifier (innermost cube first, at most four; within one cube, the first in
+script order) whose mask bit is set at the vertex, else material 0. Each material present in a cube draws two
+textures: near (`tex1`, frequency `freq1`/2) and far (`tex2`), each chosen from its 8×8 tile map by
+`((int)(freq * cubeCentre) >> (22-L or 23-L) & 0x7ff) >> 8`. UVs are planar in x/y; vertices with projection
+bits (bits 8–9 for tex1, 6–7 for tex2) map v to height instead, for cliffs. Near and far textures cross-fade with the
+morph factor, and child vertices blend between their own and their parent's material.
+
+The original draws three passes: the first material's near texture opaque, every other layer additively with
+per-vertex weights summing to 1, then the lightmap multiplied in as `1/3 + 2/3 × lightmap`. Texture rows are
+stored top-down with v=0 at the first row, for both ground textures and lightmaps.

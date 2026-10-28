@@ -13,7 +13,8 @@ open-igi is a free, non-commercial fan project. It is not affiliated with or end
 ## Status
 
 Pre-alpha. Every level loads in the browser: the terrain from the game's own octree files, and every building and prop from
-its placement script, with real textures. Next: terrain texturing, then characters. Milestone 1 is walking around Mission 1.
+its placement script, with real textures, and the terrain is textured and lit as in the original. Next: characters in
+levels, then walking around Mission 1 on foot.
 
 ## Layout
 

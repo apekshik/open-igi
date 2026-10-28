@@ -7,8 +7,9 @@ open-igi builds on community reverse-engineering of Project I.G.I. Thank you to 
 <https://github.com/hjcminus/Project-IGI-Terrain>, MIT License, Copyright (c) 2026 hjcminus.
 
 An OpenGL reimplementation of IGI's terrain system, based on analysis of the decompiled `IGI.exe`. open-igi's terrain
-code (`src/formats/terrain.ts`, `src/level/terrain.ts`) follows its file layouts, octree conventions, child transform
-tables, vertex unpacking and height-patch interpolation.
+code (`src/formats/terrain.ts`, `src/level/terrain.ts`, `src/render/terrain.ts`) follows its file layouts, octree
+conventions, child transform tables, vertex unpacking, height-patch interpolation, level-of-detail and geomorph rules,
+material/tile-map texturing, texture-modifier masks and lightmap passes.
 
 ```
 MIT License
