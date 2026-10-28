@@ -5,7 +5,7 @@ their browser.
 
 ## Hosted build
 
-`.github/workflows/pages.yml` builds with `npm run build` and publishes `dist/` to GitHub Pages on every push to
+`.github/workflows/pages.yml` runs `npm test`, builds with `npm run build` (type check, then Vite) and publishes `dist/` to GitHub Pages on every push to
 `main`. Pages is set to the "GitHub Actions" source (`gh api -X POST repos/apekshik/open-igi/pages -f build_type=workflow`).
 The site lives at https://apekshik.github.io/open-igi/. `vite.config.ts` uses `base: "./"`, so the same build also
 works from any other static host or sub-path.
@@ -40,3 +40,25 @@ progress repainted every 100 ms).
 
 In `npm run dev`, `IGI_DATA` (env var or `.env.local`) still mounts a local PC folder at `/__igi/` and takes priority
 over stored data, except at `?view=landing`.
+
+## Checking a production build
+
+```bash
+npm run build
+npx vite preview --port 4173   # serves dist/ like a static host
+```
+
+Open it in a fresh browser profile (or after "Forget game data") and run the first-visit flow: landing page, import,
+main menu, mission select, loading screen, Mission 1, pause (Esc), options, quit, reload (data and settings must still
+be there), play again. The dev-only `IGI_DATA` mount does not exist in a build, so this is the path players take. F3
+in game shows frame rate, frame time, draw calls, triangles and JS heap.
+
+Reference numbers (RTX 5070 Ti desktop, Chrome, preview build, October 2026):
+
+| | |
+| --- | --- |
+| Import of the RIP zip (188 MB) | about 10 s |
+| Mission 1, OK to "Click to start" | about 2 s (level, systems, terrain, then shader and texture warm-up) |
+| CPU per frame in the trainyard | 1-3 ms (render 1-2 ms, AI under 1 ms) |
+| Draw calls / triangles | 100-450 / about 310k |
+| JS heap in game | about 180 MB, flat across restarts |

@@ -5,7 +5,7 @@ import { direction, METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Game, GameSystem } from "../game.ts";
 import type { HudAction, HudService, ZoomMode } from "./api.ts";
 import { UiAssets, type Sprite, type UiFont } from "./gfx.ts";
-import { MapComputer } from "./map.ts";
+import { MapComputer, NORTH_YAW } from "./map.ts";
 
 const STATUS = "screens/game/status/status.res";
 const FONTS = "menusystem/ingamemenu.res";
@@ -14,6 +14,7 @@ const FONTS = "menusystem/ingamemenu.res";
 export const HUD_GREEN = "#8cf07a";
 export const HUD_DIM = "#4f9a45";
 const HUD_RED = "#ff4a3a";
+
 
 /** status.res icon for each weapon id (WEAPON_ID_*), as in weapons/*.qvm. */
 const WEAPON_ICONS: Record<string, string> = {
@@ -298,14 +299,15 @@ class Hud {
     if (!weapon) return;
     const ctx = this.ctx;
     const key = weaponKey(weapon.id);
-    const icon = this.sprite(WEAPON_ICONS[key] ?? "");
+    // The M16 with its grenade launcher selected has its own icon and counts grenades.
+    const icon = (weapon.alternate && this.sprite("m16_alternative")) || this.sprite(WEAPON_ICONS[key] ?? "");
     const right = W - 12;
     const bottom = H - 12;
     if (icon) ctx.drawImage(icon.frames[0], right - icon.width, bottom - icon.height);
     else this.font4.draw(ctx, weapon.name, right, bottom - this.font4.lineHeight, { color: HUD_GREEN, align: "right" });
     if (weapon.clipSize <= 0) return;
     const rowY = bottom - (icon?.height ?? 14) - 40;
-    const display = ammoDisplay(key);
+    const display = weapon.alternate ? ammoDisplay("GRENADE") : ammoDisplay(key);
     const ammo = this.sprite(display.sprite);
     let x = right;
     // Rounds in reserve, then the rounds left in the clip as a big number, then the clip picture.
@@ -347,8 +349,9 @@ class Hud {
       ctx.globalAlpha = 1;
     }
     // The dial turns with the view: north sits where it is relative to the facing direction (yaw is CCW, so the
-    // north marker moves clockwise as the player turns left).
-    ctx.rotate(yaw);
+    // north marker moves clockwise as the player turns left). IGI's compass north is world -Y (see NORTH_YAW).
+    const heading = yaw - NORTH_YAW;
+    ctx.rotate(heading);
     if (ring) {
       for (let q = 0; q < 4; q++) {
         ctx.save();
@@ -364,14 +367,14 @@ class Hud {
       const ly = -Math.cos(a) * (r - 13);
       ctx.save();
       ctx.translate(lx, ly);
-      ctx.rotate(-yaw);
+      ctx.rotate(-heading);
       this.font1.draw(ctx, letters[i], 0, -5, { color: i === 0 ? "#ffffff" : HUD_GREEN, align: "center" });
       ctx.restore();
     }
     ctx.restore();
     // Fixed marker: the direction the player faces.
     if (dot) ctx.drawImage(dot.frames[0], cx - dot.width / 2, cy - r - dot.height / 2 + 2);
-    const deg = Math.round(((-yaw * 180) / Math.PI) % 360 + 360) % 360;
+    const deg = Math.round(((-heading * 180) / Math.PI) % 360 + 360) % 360;
     this.font1.draw(ctx, String(deg).padStart(3, "0"), cx, cy + r + 3, { color: HUD_GREEN, align: "center" });
   }
 
