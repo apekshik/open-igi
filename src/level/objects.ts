@@ -19,6 +19,12 @@ export interface Placement {
    * exists while it runs: elevator-shaft blockers, intact/destroyed variants, cutscene-only props.
    */
   gates?: number[];
+  /**
+   * The vehicle the placement rides on, when it sits inside a Heli/Car/Plane/Train task (cargo on Mission 1's flatcar,
+   * the cabin props of the Hueys): the vehicle's task id and, for trains, the car (0 = the locomotive, which carries
+   * the id; wagons are its Train children in order).
+   */
+  carrier?: { task: number; car: number };
 }
 
 export interface HeightMapTask {
@@ -69,6 +75,7 @@ export interface LevelObjects {
 
 // Types whose params start (x, y, z, a, b, c, model).
 const POSE_THEN_MODEL = new Set(["Building", "EditRigidObj"]);
+const VEHICLES = new Set(["Heli", "Car", "Plane", "Train"]);
 
 export function levelObjects(statements: QvmCall[]): LevelObjects {
   const placements: Placement[] = [];
@@ -81,11 +88,11 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
 
   const num = (v: QvmValue | undefined) => (typeof v === "number" ? v : NaN);
 
-  function visit(task: QvmCall, gates: number[]) {
+  function visit(task: QvmCall, gates: number[], carrier?: Placement["carrier"]) {
     if (task.fn !== "Task_New") return;
     const [id, type, name, ...rest] = task.args;
     const t = String(type);
-    const gated = gates.length ? { gates } : {};
+    const gated = { ...(gates.length ? { gates } : {}), ...(carrier ? { carrier } : {}) };
     typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1);
     const p = rest.map(num);
 
@@ -120,7 +127,15 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
     }
 
     const inner = t === "ConditionalContainer" && num(id) >= 0 ? [...gates, num(id)] : gates;
-    for (const child of rest) if (isCall(child)) visit(child, inner);
+    // A wagon (a Train inside a Train) keeps the car its train gave it.
+    if (VEHICLES.has(t) && num(id) >= 0 && !(t === "Train" && carrier)) carrier = { task: num(id), car: 0 };
+    let wagon = 0;
+    for (const child of rest) {
+      if (!isCall(child)) continue;
+      // A train's wagons are its Train children; what sits inside one rides that car.
+      const isWagon = t === "Train" && child.args[1] === "Train";
+      visit(child, inner, isWagon && carrier ? { task: carrier.task, car: ++wagon } : carrier);
+    }
   }
 
   for (const s of statements) visit(s, []);

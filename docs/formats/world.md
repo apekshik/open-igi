@@ -37,7 +37,9 @@ Colours are raw 0..1 values and can exceed 1 (level 2's sky top is 1.13); we cla
 - **Sun**: towards-sun vector `(-sin γ cos β, cos γ cos β, sin β)` in IGI space (yaw convention of `coords.direction`).
   Checked against the baked shadows in the terrain lightmaps of level 1 (shadows fall east, the sun is west-north-west).
   Objects without lightmaps get `back + front x max(0, n·l)`, back = "Back Color" (equal to the terrain ambient in every
-  level).
+  level). Characters, vehicles and pickups (three.js Lambert) get the same: a hemisphere light of the back colour and a
+  directional light of the front colour, both at intensity pi, since three.js divides light by pi (at 1 they were lit
+  at a third of the world's brightness: Jones nearly black in the insertion helicopter's cabin).
 
 ## Per-object lightmaps: `lightmaps/lightmaps.res` → `.olm` (confirmed)
 

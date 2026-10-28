@@ -161,6 +161,12 @@ export function missionSystem(): GameSystem {
           const t = objects.entityTasks.get(entityId);
           return t instanceof DoorTask && t.active ? { open: t.open, moving: t.moving, locked: t.isLocked() } : null;
         },
+        carrier: (task, car) => {
+          let node = logic.tree.byId.get(task);
+          if (node && car > 0) node = node.children.filter((c) => c.type === "Train")[car - 1];
+          const c = node ? carriers.of(node) : null;
+          return c ? { reference: c.reference, current: c.current() } : null;
+        },
         rider: (aiId) => {
           const c = carriers.ofCharacter(aiId);
           if (!c) return null;

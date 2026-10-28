@@ -312,6 +312,7 @@ class AiSystem implements AiService, AiWorld {
     soldier.passive = passive || spec.scripted;
     if (spec.cutscene) {
       soldier.actor = true;
+      if (body) body.actorRoots = true;
       soldier.invulnerable = true;
       // Riders of the cutscene's helicopters, trains and trucks keep their seats (the mission system knows the vehicles).
       soldier.anchor = game.services.mission?.rider?.(spec.aiId) ?? null;

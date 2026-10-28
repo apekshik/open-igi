@@ -98,6 +98,13 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
   const guns = new Map<number, StationaryGunSpec>();
   // Patrol paths outside any soldier (level4 keeps its friendly team's routes in a shared "Patrol Paths" container).
   const sharedPatrols = new Map<number, PatrolCommand[]>();
+  // Cutscene ConditionalContainers seen so far, for containers that run only while one of them does.
+  const cutsceneContainers = new Set<number>();
+  const whileCutscene = (condition: string) =>
+    condition.split("||").every((term) => {
+      const m = /^\s*\(?\s*(ConditionalContainer|CutScene)_(\d+)\.isRun\s*\)?\s*$/.exec(term);
+      return !!m && (m[1] === "CutScene" || cutsceneContainers.has(Number(m[2])));
+    });
 
   function visit(task: QvmCall, scripted: boolean, gates: number[], generator?: CharacterSpec["generator"], vehicle?: string, inCutscene = false) {
     if (task.fn !== "Task_New") return;
@@ -131,8 +138,10 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
       return;
     }
     // Level 1 keeps its whole dynamic world in a container named "Cutscenes"; only the conditional cutscenes inside
-    // count (level 3 spells one "Intro cutscnee").
-    const cutscene = t === "ConditionalContainer" && /cuts*sc/i.test(String(name));
+    // count (level 3 spells one "Intro cutscnee"). So does a container that runs only while cutscenes do: level 12's
+    // "Anya HQ" ("ConditionalContainer_3000.isRun || ConditionalContainer_3002.isRun", its intro and outro).
+    const cutscene = t === "ConditionalContainer" && (/cuts*sc/i.test(String(name)) || whileCutscene(String(params[0] ?? "")));
+    if (cutscene && tid >= 0) cutsceneContainers.add(tid);
     const inside = scripted || SCRIPTED_PARENTS.has(t) || cutscene;
     const gated = t === "ConditionalContainer" && tid >= 0 ? [...gates, tid] : gates;
     const gen = t === "GuardGenerator" ? { taskId: tid, condition: String(params[0] ?? ""), maxSpawns: num(params[1]) || 1 } : generator;

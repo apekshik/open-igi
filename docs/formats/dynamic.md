@@ -176,7 +176,11 @@ placement` (`src/game/mission/carriers.ts`). A Heli/Car/Plane's level pose is it
 is the car with the train at its `Position`. Riders are characters inside the vehicle task, or whose AI graph is
 (see `ai.md`). An `EditCamera` with a `Link task ID` rides its object the same way, turning, pitching and banking
 with it (the tail cameras and in-cabin closeups of the insertion helicopters, the camera on Jones's flatcar); a
-`Target task ID` naming a train looks at that car.
+`Target task ID` naming a train looks at that car. Static models inside a vehicle task ride it too (`Placement.carrier`;
+the world system moves them with `MissionService.carrier` and gives them dynamic colliders): the cargo on Mission 1's
+flatcar (nine crates and barrels Jones hides among; they were left on the rails where the train starts) and Mission
+9's train, and the `715_01_1` cabin interior every gameplay Huey carries (levels 2-5, 8, 10-13), which stayed in the
+air where the helicopter was placed.
 
 ## Ladders (confirmed)
 

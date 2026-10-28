@@ -30,7 +30,9 @@ export function physicsSystem(): GameSystem {
       const placed: PlacedModel[] = [];
       for (const object of game.staticObjects) {
         const placement = object.userData.placement as Placement | undefined;
-        if (!placement) continue;
+        // Models riding a vehicle (train cargo, the Hueys' cabin props) collide as dynamic colliders the world system
+        // moves with their vehicle, not where the level left them.
+        if (!placement || placement.carrier) continue;
         object.updateMatrix();
         placed.push({ placement, matrix: object.matrix.elements });
         // Attached sub-models (building interiors, fittings) that the world system adds as children: they carry their

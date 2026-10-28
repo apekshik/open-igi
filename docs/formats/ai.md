@@ -158,9 +158,25 @@ their containers start and stop (checked every frame, after the mission logic). 
 fighting, invulnerable) but run their HumanAI scripts, which is all a cutscene needs: the scripts answer AIEVENT_IDLE
 with `AIAction_PlayAnimation` (often gated on the cutscene clock, `CutScene_1200.nTick > 547`) or a PatrolPath whose
 commands play a "predefined animation" (240/241 sitting in a helicopter, 243 lying on a flatcar, 242 jumping from the
-helicopter, 239 jumping off the train, 244 jumping out of a landed helicopter). They stand exactly where they are
-placed (no snapping to the ground) and carry only the guns their tasks give them. A finished one-shot clip leaves its
-root motion with the actor (falls and climbs, not posture changes), so a jump ends where it lands.
+helicopter, 239 jumping off the train, 244 jumping out of a landed helicopter). They carry only the guns their tasks
+give them. A container also counts as a cutscene's when it runs only while cutscenes do (level 12's "Anya HQ",
+`ConditionalContainer_3000.isRun || ConditionalContainer_3002.isRun`; level 14's "Anya HQ", `CutScene_1104.isRun`);
+before that, level 12's Anya was a gameplay soldier, snapped to her chair and floating above it.
+
+**Where an actor's body goes (inferred from how the levels place them).** The level places a cutscene character
+where it shows it, which is not always where its feet are:
+- A *posture* (a clip whose root does not move and whose lowest bone hangs less than 0.75 m below the pelvis:
+  sitting, at the wheel, lying, crouching, kneeling) has its **pelvis at the placement**, root x/y/z ignored. Anya
+  (clip 4, root 0.62 m behind and 0.70 m above its origin) is placed on her chair's seat, Jones (240) on the
+  helicopter bench, Mission 8's driver (61, pelvis at a standing 0.97 m) on the seat; applying the root put Anya on
+  air behind her chair with her feet at the keyboard, and Jones's legs in the in-cabin closeup with his head out of
+  frame. With the pelvis there, every one of those shots frames as intended.
+- Anything else (standing, jumps) has its feet at the placement, root x/y measured from the clip's first key, and
+  comes down onto the surface under its lowest bone (`physics.groundHeight`, at most 3 m, never up through what it
+  stands in): Jones is placed 0.8 m above the insertion helicopters' floor in their doorways (levels 1 and 3), the
+  handycam guard of Mission 1 a metre above the yard. During a one-shot whose root moves (a jump) the body is only
+  lifted out of what it lands in (Jones landing on the boxcar roof), and across a change of clip the lowest bone keeps
+  its height, so a jump ends where it lands.
 
 **Riders.** An actor rides a vehicle when its HumanSoldier is inside a `Heli`/`Car`/`Plane`/`Train` task, or when
 its AI graph is: Mission 1's Jones jumping onto the train walks graph 2, placed in one of the train's cars, and the
