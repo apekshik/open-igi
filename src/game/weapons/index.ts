@@ -313,7 +313,7 @@ class Arsenal implements WeaponsService {
     if (!spec) return { hits: [] };
     const d = vec3.normalize(dir);
     if (spec.type === "GRENADE" || spec.projectile === "MISSILE" || spec.type === "PROXIMITYMINE") {
-      this.launch(ownerId, spec, origin, d);
+      this.launch(ownerId, spec, origin, d, options);
       return { hits: [] };
     }
     if (spec.type === "KNIFE") return this.stab(ownerId, spec, origin, d, options.damageScale ?? 1);
@@ -437,7 +437,7 @@ class Arsenal implements WeaponsService {
 
   // ------------------------------------------------------------------------------------------------- projectiles
 
-  private launch(ownerId: number, spec: WeaponSpec, origin: Vec3, dir: Vec3) {
+  private launch(ownerId: number, spec: WeaponSpec, origin: Vec3, dir: Vec3, options: FireOptions = {}) {
     const x = extras(this.data, spec);
     const lib = this.game.level.library;
     const make = (name: string | undefined) => {
@@ -472,7 +472,8 @@ class Arsenal implements WeaponsService {
     this.sound(spec.fireSound, ownerId === this.playerId ? undefined : origin, 15 * METRE);
     this.projectiles.add({
       kind: spec.id === "WEAPON_ID_FLASHBANG" ? "flashbang" : "grenade", weapon: spec.id, ownerId: owner, position: origin,
-      velocity: vec3.scale(up, speed), timer: GRENADE_FUSE, state: "flying", object: make(spec.model), bounces: 0,
+      velocity: options.velocity ? [...options.velocity] : vec3.scale(up, speed), timer: options.fuse ?? GRENADE_FUSE,
+      state: "flying", object: make(spec.model), bounces: 0,
     });
     this.game.events.emit("noise", { position: origin, radius: SILENCED_NOISE, sourceId: ownerId, kind: "throw" });
   }

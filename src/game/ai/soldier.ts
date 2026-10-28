@@ -6,9 +6,11 @@
 // play its "what was that?" animation), and when the queue runs dry the soldier gets AIEVENT_IDLE again, which
 // restarts its patrol.
 //
-// Combat follows the type's HumanAIConfigItem (common/ai/settings.qvm): reaction and movement delays, bursts of a
-// fraction of the clip, hit probability falling off with range, evasive rolls and dives, tracking distance and the
-// targeting timeout after which the soldier searches the last place it saw the target and gives up.
+// Combat follows the type's HumanAIConfigItem (common/ai/settings.qvm) for the game difficulty: reaction and movement
+// delays, bursts of a fraction of the clip, hit probability falling off with range, evasive rolls and dives, grenade
+// throws, tracking distance and the targeting timeout after which the soldier searches the last place it saw the
+// target and gives up. Patrols move about; guards, snipers and RPG soldiers hold their post; gunners man a
+// stationary gun (gun.ts). Soldiers open unlocked doors in their way.
 import * as THREE from "three";
 import type { QvmScript } from "../../formats/qvm.ts";
 import { direction, METRE, vec3, type Vec3 } from "../coords.ts";
@@ -17,6 +19,7 @@ import type { Game } from "../game.ts";
 import { cycleVelocity } from "../player/animator.ts";
 import type { AiCharacter, AiEvent, AiState } from "./api.ts";
 import type { SoldierBody } from "./body.ts";
+import type { MountedGun } from "./gun.ts";
 import type { AiConfig, CharacterSpec, PatrolCommand } from "./level.ts";
 import { dist, type NavGraph } from "./nav.ts";
 import { runScript, type ScriptNatives, type ScriptValue } from "./script.ts";
@@ -52,6 +55,9 @@ export const CLIP = {
   crouchRollRight: 32,
   lookAround: 36,
   turnAround: 37,
+  stunned: 39,
+  /** Right hand swings up and forward over 1.2 s: the grenade throw ("Stand - Throwing grenade"). */
+  throwGrenade: 70,
   deathsFront: [28, 29],
   deathsBack: [22, 23],
   deathHead: [30, 22],
@@ -93,8 +99,15 @@ export interface AiWorld {
   raiseAlarm(source: Soldier): void;
   taskPosition(id: number): Vec3 | undefined;
   characters(): Soldier[];
-  /** Fire one round (weapons service, or our own hitscan). */
-  shoot(s: Soldier, origin: Vec3, dir: Vec3): void;
+  /** Fire one round of the soldier's weapon, or of `weapon` (a stationary gun), through the weapons service. */
+  shoot(s: Soldier, origin: Vec3, dir: Vec3, weapon?: WeaponInfo): void;
+  /** Throw a grenade or flashbang: launch velocity (units/s) and seconds to the explosion. */
+  throwGrenade(s: Soldier, weapon: string, origin: Vec3, velocity: Vec3, fuse: number): void;
+  weaponInfo(id: string): WeaponInfo | null;
+  /** A StationaryGun by task id. */
+  gun(id: number): MountedGun | undefined;
+  /** Door entities (mission objects of kind "door"). */
+  doors(): Entity[];
   sound(name: string, at: Vec3, volume?: number): void;
   /** Whether a character standing at this position can be on screen this frame. */
   inView(position: Vec3): boolean;
@@ -136,8 +149,18 @@ export class Soldier implements AiCharacter {
 
   readonly spec: CharacterSpec;
   readonly body: SoldierBody | null;
-  readonly config: AiConfig;
+  /** The type's settings for the current difficulty (replaced when the difficulty changes). */
+  config: AiConfig;
   readonly weapon: WeaponInfo | null;
+  /** Grenades and flashbangs carried (one per Gun task), thrown in combat. */
+  grenades: string[];
+  /** The stationary gun this soldier is manning. */
+  manning: MountedGun | null = null;
+  /** Seconds of flinch after a hit above the type's recoil threshold (no firing meanwhile). */
+  recoil = 0;
+  /** An extra or a passenger: no senses, no fighting; follows `anchor` when it has one. */
+  passive = false;
+  anchor: (() => { position: Vec3; yaw: number } | null) | null = null;
   readonly graph: NavGraph | null;
   stance: Stance = "stand";
   clip = 0;
@@ -187,6 +210,10 @@ export class Soldier implements AiCharacter {
   /** A clip that plays to its end before the base clip resumes (stance changes, rolls, hit reactions). */
   private oneShot: { id: number; then?: () => void } | null = null;
   private suspicious = 0;
+  /** Door handling while walking: next check, and the door being waited on. */
+  private doorCheck = 0;
+  private doorWait: { id: number; time: number } | null = null;
+  private doorsTried = new Map<number, number>();
 
   constructor(world: AiWorld, spec: CharacterSpec, body: SoldierBody | null, config: AiConfig, weapon: WeaponInfo | null) {
     this.world = world;
@@ -204,6 +231,7 @@ export class Soldier implements AiCharacter {
     this.graph = world.graph(spec.graphId);
     this.object = body?.object;
     this.clip = weapon?.clipSize ?? 0;
+    this.grenades = [...spec.weapons.filter((w) => w === "WEAPON_ID_GRENADE"), ...spec.weapons.filter((w) => w === "WEAPON_ID_FLASHBANG")];
     if (body) body.clips.play(this.idleClip(), { blend: 0 });
   }
 
@@ -226,6 +254,21 @@ export class Soldier implements AiCharacter {
   /** Deliver an AI event: run the scripts for it unless the current actions outrank it. */
   post(event: AiEvent, options: { position?: Vec3; animation?: number } = {}) {
     if (!this.alive && event !== "AIEVENT_DEAD") return;
+    // Events raised while handling events (alerts passed between comrades) stop after a few levels.
+    if (this.posting > 3) return;
+    this.posting++;
+    try {
+      this.handle(event, options);
+    } finally {
+      this.posting--;
+    }
+  }
+
+  /** The comrade whose AIEVENT_ALERT is being handled. */
+  alertFrom: Soldier | null = null;
+  private posting = 0;
+
+  private handle(event: AiEvent, options: { position?: Vec3; animation?: number }) {
     const rank = this.rankOf(event);
     if (event !== "AIEVENT_CREATE" && this.actions.length && rank > this.rank) return;
     this.event = event;
@@ -252,8 +295,18 @@ export class Soldier implements AiCharacter {
     const level = this.world.script(this.aiId);
     const common = this.world.commonScript(this.aiType);
     const natives = this.natives(queued, common);
-    if (level) runScript(level, natives);
-    else if (common) runScript(common, natives);
+    // Level scripts may test mission state directly, e.g. level 8's `else if (AreaActivate_481.nActive)`.
+    const variable = (name: string) => {
+      const mission = this.game.services.mission;
+      if (!mission || !name.includes(".")) return 0;
+      try {
+        return mission.evaluate(name);
+      } catch {
+        return 0;
+      }
+    };
+    if (level) runScript(level, natives, variable);
+    else if (common) runScript(common, natives, variable);
     else natives.AIFunction_DefaultHandler();
   }
 
@@ -310,9 +363,13 @@ export class Soldier implements AiCharacter {
       AIFunction_RemoveAlarmActions: () => {
         this.actions = this.actions.filter((a) => !(a instanceof ActivateAction));
       },
-      AIFunction_SendResponse: () => this.shout(),
+      // Answer the comrade whose alert this is (AIEVENT_ALERT_RESPONSE); the alert itself spread when it started.
+      AIFunction_SendResponse: () => {
+        const from = this.alertFrom;
+        if (this.event === "AIEVENT_ALERT" && from?.alive) from.post("AIEVENT_ALERT_RESPONSE", { position: this.position });
+      },
       AIFunction_GetGunnerID: () => this.gunnerId,
-      AIFunction_GetGunnerStatus: () => 0,
+      AIFunction_GetGunnerStatus: () => Number(this.manning !== null),
       AIAction_Patrol: (path, start) => {
         const commands = this.spec.patrols.get(n(path));
         if (commands) queued.push(new PatrolAction(commands, n(start)));
@@ -329,7 +386,10 @@ export class Soldier implements AiCharacter {
       AIAction_Dead: () => void queued.push(dead()),
       AIAction_RunToNode: (node) => void queued.push(toNode(n(node), "run")),
       AIAction_FireAtTask: (task, rounds, seconds) => void queued.push(fireAtTask(n(task), n(rounds), n(seconds))),
+      AIAction_FireAtNode: (node, rounds, seconds) => void queued.push(fireAtTask(n(node), n(rounds), n(seconds), true)),
       AIAction_WalkToNode: (node) => void queued.push(toNode(n(node), "walk")),
+      AIAction_MoveToEvent: () => void queued.push(moveToEvent()),
+      AIAction_Stunned: () => void queued.push(animation(CLIP.stunned, "alert")),
     };
     return natives;
   }
@@ -342,6 +402,7 @@ export class Soldier implements AiCharacter {
       const d = dist(other.position, this.position);
       if (d < 15 * METRE || (d < 35 * METRE && this.game.services.physics?.lineOfSight(this.eye(), other.eye()))) {
         other.lastKnown ??= [...this.lastKnown];
+        other.alertFrom = this;
         other.post("AIEVENT_ALERT", { position: this.lastKnown });
       }
     }
@@ -350,6 +411,18 @@ export class Soldier implements AiCharacter {
   // ------------------------------------------------------------------------------------------------- frame
 
   update(dt: number) {
+    if (this.passive) {
+      const a = this.anchor?.();
+      if (a) {
+        this.position = [...a.position];
+        this.yaw = a.yaw;
+      }
+      if (this.alive && !this.oneShot) this.setBase(this.idleClip());
+      if (!this.alive) this.actions[0]?.update(this, dt);
+      this.animate(dt);
+      return;
+    }
+    if (this.recoil > 0) this.recoil -= dt;
     if (this.alive) {
       this.perceive(dt);
       if (this.suspicious > 0 && this.state !== "combat") {
@@ -398,10 +471,17 @@ export class Soldier implements AiCharacter {
     b.clips.advance(dt);
     b.place(this.game.local(this.position), this.yaw);
     // Off-screen bodies are not posed; far-away ones are posed at a quarter of the rate.
+    this.posed = false;
     if (!this.world.inView(this.position)) return;
     const far = dist(this.position, this.game.fromScene(this.game.camera.position)) > 120 * METRE;
-    if (!far || ((this.id + Math.floor(this.game.time * 30)) & 3) === 0) b.pose(dt);
+    if (!far || ((this.id + Math.floor(this.game.time * 30)) & 3) === 0) {
+      b.pose(dt);
+      this.posed = true;
+    }
   }
+
+  /** Whether the body's bones show this frame's pose (off-screen bodies are not posed, so their gun bone is stale). */
+  posed = false;
 
   setBase(clip: number, speed = 1) {
     this.baseClip = this.body?.clips.clip(clip) ? clip : this.idleClip();
@@ -424,11 +504,54 @@ export class Soldier implements AiCharacter {
     this.world.shoot(this, origin, dir);
   }
 
+  /** Fire one round of another weapon (a stationary gun's). */
+  shootWith(weaponId: string, origin: Vec3, dir: Vec3) {
+    const w = this.world.weaponInfo(weaponId);
+    if (w) this.world.shoot(this, origin, dir, w);
+  }
+
+  weaponInfo(id: string) {
+    return this.world.weaponInfo(id);
+  }
+
+  throwGrenade(weapon: string, origin: Vec3, velocity: Vec3, fuse: number) {
+    this.world.throwGrenade(this, weapon, origin, velocity, fuse);
+  }
+
+  /** The stationary gun with this task id, if the level has it. */
+  gunAt(id: number): MountedGun | undefined {
+    return this.world.gun(id);
+  }
+
+  /** Take position at a stationary gun (AIAction_Activate on the gunner id). False if someone else has it. */
+  mount(gun: MountedGun): boolean {
+    if (gun.gunner >= 0 && gun.gunner !== this.id) {
+      const other = this.game.entities.get(gun.gunner);
+      if (other?.alive) return false;
+    }
+    gun.gunner = this.id;
+    this.manning = gun;
+    this.route = null;
+    this.stance = "stand";
+    this.position = gun.standPosition(this.game);
+    this.yaw = gun.yaw;
+    return true;
+  }
+
+  dismount() {
+    if (this.manning?.gunner === this.id) this.manning.gunner = -1;
+    this.manning = null;
+  }
+
   /**
    * Where to go to activate task `id`: the task itself when it is the alarm trigger or a gun to man, otherwise (an
    * alarm control) the nearest alarm pad when the mission system knows them.
    */
   alarmTarget(id: number): Vec3 | undefined {
+    if (id === this.gunnerId) {
+      const gun = this.world.gun(id);
+      if (gun) return gun.standPosition(this.game);
+    }
     if (id === this.alarmTriggerId || id === this.gunnerId) return this.world.taskPosition(id);
     const pads = this.game.services.mission?.alarmPads() ?? [];
     let best: Vec3 | undefined;
@@ -475,9 +598,20 @@ export class Soldier implements AiCharacter {
     this.travelSpeed = kmh;
   }
 
-  /** Plan a route to a position over the soldier's graph (straight line without one). */
-  goTo(target: Vec3, finish = true) {
-    const points = this.graph ? this.graph.route(this.position, target, finish) : [target];
+  /** Plan a route to a position over the soldier's graph (straight line without one), optionally only its first stretch. */
+  goTo(target: Vec3, finish = true, limit = Infinity) {
+    let points = this.graph ? this.graph.route(this.position, target, finish) : [target];
+    if (limit < Infinity) {
+      let total = 0, prev = this.position;
+      const cut: Vec3[] = [];
+      for (const p of points) {
+        cut.push(p);
+        total += dist(prev, p);
+        prev = p;
+        if (total >= limit) break;
+      }
+      points = cut;
+    }
     this.route = { points, i: 0 };
   }
 
@@ -492,10 +626,12 @@ export class Soldier implements AiCharacter {
   follow(dt: number, gait: "walk" | "run" | "sprint"): boolean {
     const r = this.route;
     if (!r) return true;
+    if (this.manning) this.dismount();
     if (this.stance !== "stand") this.stance = "stand";
     const target = r.points[r.i];
     const dx = target[0] - this.position[0], dy = target[1] - this.position[1];
     const d = Math.hypot(dx, dy);
+    if (this.waitForDoor(dt, dx, dy, d)) return false;
     const step = Math.min(d, this.speed(gait) * dt);
     this.turnTowards(yawTo(this.position, target), dt, 6);
     const physics = this.game.services.physics;
@@ -525,6 +661,44 @@ export class Soldier implements AiCharacter {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Doors on the way: when the next stretch of the route runs into a closed, unlocked door, the soldier opens it (as
+   * the use key does) and waits for it to swing open, up to two seconds; locked doors stay shut (the route's stuck
+   * rule moves on). A door is tried once in a while, not over and over.
+   */
+  private waitForDoor(dt: number, dx: number, dy: number, d: number): boolean {
+    const mission = this.game.services.mission;
+    if (!mission?.door) return false;
+    if (this.doorWait) {
+      const state = mission.door(this.doorWait.id);
+      this.doorWait.time += dt;
+      if (!state || state.open >= 0.6 || state.moving < 0 || this.doorWait.time > 2) {
+        this.doorWait = null;
+        return false;
+      }
+      this.setBase(this.idleClip());
+      return true;
+    }
+    if ((this.doorCheck -= dt) > 0 || d <= 0) return false;
+    this.doorCheck = 0.25;
+    const physics = this.game.services.physics;
+    if (!physics || !this.world.doors().length) return false;
+    const reach = Math.min(d, 1.5 * METRE) + this.radius;
+    const from: Vec3 = [this.position[0], this.position[1], this.position[2] + 1 * METRE];
+    const to: Vec3 = [from[0] + (dx / d) * reach, from[1] + (dy / d) * reach, from[2]];
+    const hit = physics.raycast(from, to, { ignoreEntity: this.id });
+    const door = hit?.entityId != null ? this.game.entities.get(hit.entityId) : undefined;
+    if (!door || door.kind !== "door") return false;
+    const tried = this.doorsTried.get(door.id);
+    if (tried !== undefined && this.game.time - tried < 8) return false;
+    this.doorsTried.set(door.id, this.game.time);
+    const state = mission.door(door.id);
+    if (!state || state.locked || state.open >= 0.6 || state.moving > 0 || !mission.openDoor(this.id, door.id)) return false;
+    this.doorWait = { id: door.id, time: 0 };
+    this.setBase(this.idleClip());
+    return true;
   }
 
   private speedOfClip(id: number) {
@@ -567,6 +741,7 @@ export class Soldier implements AiCharacter {
   }
 
   private perceive(dt: number) {
+    if (this.passive) return;
     this.perceiveTimer -= dt;
     const fighting = this.state === "combat";
     const interval = fighting ? 0.1 : 0.2;
@@ -672,6 +847,7 @@ export class Soldier implements AiCharacter {
       this.die(part, from, sourceId);
       return;
     }
+    if (amount >= this.config.recoilThreshold) this.recoil = Math.max(this.recoil, 0.5 + rand() * 0.3);
     this.world.sound(`ai_hit_0${1 + Math.floor(rand() * 3)}`, this.position);
     this.lastKnown = [...from];
     this.awareness = 1;
@@ -688,6 +864,7 @@ export class Soldier implements AiCharacter {
     this.oneShot = null;
     this.actions = [];
     this.rank = Infinity;
+    this.dismount();
     // Script DEAD handlers only queue AIAction_Dead; we always play the death ourselves.
     this.actions = [dead(part, from)];
     // The weapons system drops the gun as a pickup.
@@ -808,6 +985,23 @@ function fallFlat(seconds: number): Action {
   };
 }
 
+/** AIAction_MoveToEvent: run to where the event happened. */
+function moveToEvent(): Action {
+  let started = false;
+  return {
+    state: "search",
+    update(s, dt) {
+      if (!started) {
+        started = true;
+        const p = s.eventPosition ?? s.lastKnown;
+        if (!p) return true;
+        s.goTo(p);
+      }
+      return s.follow(dt, "run");
+    },
+  };
+}
+
 function toNode(node: number, gait: "walk" | "run"): Action {
   let started = false;
   return {
@@ -836,6 +1030,8 @@ class ActivateAction implements Action {
   update(s: Soldier, dt: number) {
     const alarm = this.task !== s.gunnerId;
     if (alarm && s.game.services.ai?.alarm) return true;
+    const gun = alarm ? undefined : s.gunAt(this.task);
+    if (gun && s.manning === gun) return true;
     const p = s.alarmTarget(this.task);
     if (!p) return true;
     if (!this.started) {
@@ -848,6 +1044,10 @@ class ActivateAction implements Action {
       s.setBase(s.idleClip());
       s.turnTowards(yawTo(s.position, p), 1);
     }
+    if (gun) {
+      s.mount(gun);
+      return true;
+    }
     if ((this.pressing -= dt) > 0) return false;
     if (alarm) s.raiseAlarm();
     else s.game.services.mission?.use(s.id, this.task);
@@ -855,15 +1055,18 @@ class ActivateAction implements Action {
   }
 }
 
-/** AIAction_FireAtTask(task, rounds, seconds, ...): shoot at a task's position (scripted suppression fire). */
-function fireAtTask(task: number, rounds: number, seconds: number): Action {
+/**
+ * AIAction_FireAtTask(task, rounds, seconds, ...) / AIAction_FireAtNode(node, ...): shoot at a task's position or a
+ * graph node (scripted suppression fire).
+ */
+function fireAtTask(task: number, rounds: number, seconds: number, node = false): Action {
   let left = Math.max(1, rounds);
   let wait = 0;
   let hold = Math.max(0.5, seconds);
   return {
     state: "combat",
     update(s, dt) {
-      const p = s.taskPosition(task) ?? s.eventPosition;
+      const p = (node ? s.graph?.node(task)?.position : s.taskPosition(task)) ?? s.eventPosition;
       if (!p || !s.weapon) return true;
       s.stopMoving();
       s.setBase(left > 0 ? CLIP.fire : CLIP.aim);
@@ -987,6 +1190,50 @@ function combat(): Action {
   return new CombatAction();
 }
 
+/**
+ * How a soldier fights, after the combat modes IGI.exe names: "Combat - Kneel/Liedown/RePosition/Follow/LookForTarget"
+ * (patrols move, dodge and close in), "Guard Combat - Stand" (guards and snipers hold their post), "RPG Combat -
+ * Stand/Kneel" and "Gunner Combat - Stand" (at a stationary gun).
+ */
+type CombatStyle = "mobile" | "post" | "rpg" | "gunner";
+
+function combatStyle(s: Soldier): CombatStyle {
+  if (s.manning) return "gunner";
+  if (s.aiType === "AITYPE_RPG" || s.weapon?.id === "WEAPON_ID_RPG18") return "rpg";
+  if (/GUARD|SNIPER|GUNNER/.test(s.aiType)) return "post";
+  return "mobile";
+}
+
+/** Grenade throw (soldier clip 70: right hand swings up to 1.6 m and forward) and the moment the grenade leaves the hand. */
+const THROW_RELEASE = 0.55;
+/** Horizontal throw speed cap (m/s): fly times from settings.qvm stretch so long throws stay a lob. */
+const THROW_SPEED = 16;
+const GRAVITY = 9.81 * METRE;
+
+/**
+ * Chance that one aimed round hits, from the type's HumanAIConfigItem: "hit probability at minimum range" falling to
+ * "at maximum range" over the soldier's view range, capped beyond 10 m by "aim precision", times how long the target
+ * has been in sight (aim settles in over 3 s) and how hard the target is to hit (crouched, prone, moving). The data
+ * gives the two probabilities and the precision; how IGI.exe combines them is not known (see docs/formats/ai.md).
+ */
+export function hitChance(s: Soldier, d: number): number {
+  const c = s.config;
+  const range = Math.max(s.viewLength, s.alarmViewLength) * METRE;
+  const f = Math.min(1, d / range);
+  let p = c.hitProbabilityNear + (c.hitProbabilityFar - c.hitProbabilityNear) * f;
+  const close = Math.max(0, 1 - d / (10 * METRE));
+  p *= c.aimPrecision + (1 - c.aimPrecision) * close;
+  p *= Math.min(1, 0.4 + (0.6 * s.seenTime) / 3);
+  const player = s.game.services.player;
+  if (player && s.target() === player.entity) {
+    p *= player.stance === "prone" ? 0.5 : player.stance === "crouch" ? 0.75 : 1;
+    const v = player.velocity;
+    const speed = Math.hypot(v[0], v[1]) / METRE;
+    p *= speed > 3 ? 0.55 : speed > 0.5 ? 0.75 : 1;
+  }
+  return Math.max(0, Math.min(1, p));
+}
+
 class CombatAction implements Action {
   state: AiState = "combat";
   private started = false;
@@ -999,6 +1246,9 @@ class CombatAction implements Action {
   private searching = false;
   private searchHold = 0;
   private gait: "run" | "walk" = "run";
+  private grenadeCooldown = 0;
+  private firedSinceMove = true;
+  private throwing: { weapon: string; t: number; release: number; thrown: boolean } | null = null;
 
   update(s: Soldier, dt: number): boolean {
     const c = s.config;
@@ -1007,23 +1257,25 @@ class CombatAction implements Action {
       s.stopMoving();
       return true;
     }
+    const style = combatStyle(s);
     if (!this.started) {
       this.started = true;
       this.moveTimer = c.initialMoveDelay;
       // The targeting timeout counts from the moment combat starts (the soldier knows where the enemy was).
       if (!s.canSee) s.lostTime = 0;
-      // Reaction time before the first shot.
-      this.burstDelay = 0.25 + rand() * 0.5;
+      // Reaction time before the first burst: the type's delay between bursts.
+      this.burstDelay = c.minBurstDelay + rand() * c.randomBurstDelay;
       s.shout();
     }
-    if (!s.weapon) return true;
+    if (!s.weapon && !s.manning) return true;
+    this.grenadeCooldown -= dt;
 
-    // Lost the target for too long: search where it was last seen, then give up.
+    // Lost the target for too long: search where it was last seen (guards look around at their post), then give up.
     if (s.lostTime > c.targetingTimeout || this.searching) {
       this.state = "search";
       if (!this.searching) {
         this.searching = true;
-        if (s.lastKnown) s.goTo(s.lastKnown);
+        if (s.lastKnown && style === "mobile") s.goTo(s.lastKnown);
       }
       if (s.canSee) {
         this.searching = false;
@@ -1037,12 +1289,14 @@ class CombatAction implements Action {
       }
       if (this.searchHold <= 0) {
         this.searchHold = 1;
-        s.playOnce(CLIP.lookAround);
+        if (!s.manning) s.playOnce(CLIP.lookAround);
       }
       if (s.busyAnimating) return false;
       s.awareness = 0.3;
       return true;
     }
+    this.state = "combat";
+    if (style === "gunner") return this.gunner(s, dt, target);
 
     const eye = s.eye();
     const aimAt = s.lastKnown ?? target.position;
@@ -1050,13 +1304,25 @@ class CombatAction implements Action {
 
     if (this.reloadTimer > 0) {
       this.reloadTimer -= dt;
-      if (this.reloadTimer <= 0) s.clip = s.weapon.clipSize;
+      if (this.reloadTimer <= 0) s.clip = s.weapon!.clipSize;
+    }
+    if (this.throwing) return this.throwUpdate(s, dt);
+    // A hit above the type's recoil threshold spoils the aim: the burst stops and the soldier recovers first.
+    if (s.recoil > 0) {
+      this.burstLeft = 0;
+      this.burstDelay = Math.max(this.burstDelay, s.recoil);
     }
 
-    // Movement: close in on a hidden or distant target, or dodge.
-    if (!s.busyAnimating && !s.moving && (this.moveTimer -= dt) <= 0 && this.burstLeft === 0) {
+    // Movement: close in on a hidden or distant target, or dodge (patrols only; guards hold their post). A soldier
+    // that sees its target fires a burst between moves.
+    if (!s.busyAnimating && !s.moving && (this.moveTimer -= dt) <= 0 && this.burstLeft === 0 && (this.firedSinceMove || !s.canSee)) {
       this.moveTimer = c.moveDelay * (0.5 + rand());
-      this.decideMove(s, target, d);
+      this.firedSinceMove = false;
+      if (style === "mobile") this.decideMove(s, target, d);
+      else if (style === "rpg" && s.stance === "stand" && rand() < c.evasiveProbability) {
+        s.stance = "crouch";
+        s.playOnce(CLIP.standToCrouch);
+      }
     }
     if (s.moving) {
       if (s.follow(dt, this.gait) && s.stance !== "stand") s.stance = "stand";
@@ -1083,25 +1349,90 @@ class CombatAction implements Action {
       return false;
     }
 
-    if (!s.canSee || !facing || this.reloadTimer > 0) return false;
+    if (!s.canSee || !facing) return false;
+    if (this.reloadTimer > 0) {
+      // "Combat grenade throw when reload probability", rolled once per reload.
+      if (this.reloadTimer > 0.5 && this.maybeGrenade(s, d, true)) this.reloadTimer = Math.max(this.reloadTimer, 1.2);
+      return false;
+    }
+    const w = s.weapon!;
     if (this.burstLeft === 0) {
       if ((this.burstDelay -= dt) > 0) return false;
-      const w = s.weapon;
+      if (this.maybeGrenade(s, d, false)) return false;
       const rounds = Math.round(w.clipSize * (c.minClipFraction + rand() * c.randomClipFraction));
       this.burstLeft = Math.max(1, Math.min(rounds, c.maxRoundsPerBurst || rounds, s.clip));
       this.shotTimer = 0;
+      this.chooseAim(s, target);
     }
     if ((this.shotTimer -= dt) > 0) return false;
-    this.fire(s, target, eye, d);
+    this.fire(s, target, eye, d, style === "rpg");
     s.clip--;
     this.burstLeft--;
-    const w = s.weapon;
     this.shotTimer = Math.max(60 / Math.max(1, w.roundsPerMinute), c.minShotDelay + rand() * c.randomShotDelay);
-    if (this.burstLeft === 0) this.burstDelay = c.minBurstDelay + rand() * c.randomBurstDelay;
+    if (this.burstLeft === 0) {
+      this.burstDelay = c.minBurstDelay + rand() * c.randomBurstDelay;
+      this.firedSinceMove = true;
+    }
     if (s.clip <= 0) {
       this.burstLeft = 0;
       this.reloadTimer = w.reloadTime || 2;
+      this.grenadeRolled = false;
     }
+    return false;
+  }
+
+  private grenadeRolled = false;
+  /** Aim at the head this burst: the chest is behind cover (a target crouched behind a low wall). */
+  private aimHead = false;
+
+  private chooseAim(s: Soldier, target: Entity) {
+    const physics = s.game.services.physics;
+    const player = s.game.services.player;
+    const head: Vec3 = player && target === player.entity ? player.eye() : [target.position[0], target.position[1], target.position[2] + target.height * 0.9];
+    this.aimHead = !!physics && !physics.lineOfSight(s.eye(), [head[0], head[1], head[2] - 0.35 * METRE]);
+  }
+
+  /** Maybe start a grenade throw (settings.qvm's grenade probabilities and distances); true when one starts. */
+  private maybeGrenade(s: Soldier, d: number, reloading: boolean): boolean {
+    const c = s.config;
+    if (!s.grenades.length || this.grenadeCooldown > 0 || s.stance === "prone" || !s.lastKnown) return false;
+    if (reloading) {
+      if (this.grenadeRolled) return false;
+      this.grenadeRolled = true;
+    }
+    if (d < c.grenadeMinDistance * METRE || d > c.grenadeMaxDistance * METRE) return false;
+    this.grenadeCooldown = 4;
+    if (rand() >= (reloading ? c.grenadeOnReloadProbability : c.grenadeProbability)) return false;
+    const weapon = s.grenades.shift()!;
+    const clip = s.body?.clips.clip(CLIP.throwGrenade);
+    const length = clip ? clip.duration / 4800 : 1.2;
+    this.throwing = { weapon, t: 0, release: length * THROW_RELEASE, thrown: false };
+    if (s.stance === "crouch") s.stance = "stand";
+    s.stopMoving();
+    s.playOnce(CLIP.throwGrenade);
+    return true;
+  }
+
+  private throwUpdate(s: Soldier, dt: number): boolean {
+    const th = this.throwing!;
+    th.t += dt;
+    if (!th.thrown && th.t >= th.release) {
+      th.thrown = true;
+      const c = s.config;
+      const to = s.lastKnown ?? s.target()?.position;
+      if (to) {
+        const hand: Vec3 = vec3.add(s.eye(), vec3.add(vec3.scale(direction(s.yaw), 0.3 * METRE), [0, 0, 0.1 * METRE]));
+        const delta = vec3.sub(to, hand);
+        const horizontal = Math.hypot(delta[0], delta[1]);
+        const fly = Math.max(c.grenadeMinFlyTime + rand() * c.grenadeRandomFlyTime, horizontal / (THROW_SPEED * METRE));
+        const velocity: Vec3 = [delta[0] / fly, delta[1] / fly, delta[2] / fly + 0.5 * GRAVITY * fly];
+        const fuse = fly + c.grenadeMinExplodeTime + rand() * c.grenadeRandomExplodeTime;
+        s.throwGrenade(th.weapon, hand, velocity, fuse);
+      }
+    }
+    if (s.busyAnimating) return false;
+    this.throwing = null;
+    this.burstDelay = s.config.minBurstDelay;
     return false;
   }
 
@@ -1115,13 +1446,13 @@ class CombatAction implements Action {
       return;
     }
     if (d > c.trackingDistance * METRE) {
-      // Approach: a few nodes along the route towards the target.
+      // "Combat - Follow": a stretch of the route towards the target, then fire again.
       this.gait = "run";
-      s.goTo(target.position, false);
+      s.goTo(target.position, false, 10 * METRE);
       return;
     }
     if (rand() < c.evasiveProbability) {
-      const left = rand() < 0.5;
+      const left = rand() < c.evasiveStandRollSide;
       if (s.stance === "stand") {
         if (rand() < c.evasiveStandRollOrLie) s.playOnce(left ? CLIP.rollLeft : CLIP.rollRight, () => (s.stance = "crouch"));
         else if (d > c.lieDownDistance * METRE) {
@@ -1132,7 +1463,7 @@ class CombatAction implements Action {
           s.playOnce(CLIP.standToCrouch);
         }
       } else if (s.stance === "crouch") {
-        if (rand() < c.evasiveKneelRollOrLie) s.playOnce(left ? CLIP.crouchRollLeft : CLIP.crouchRollRight);
+        if (rand() < c.evasiveKneelRollOrLie) s.playOnce(rand() < c.evasiveKneelRollSide ? CLIP.crouchRollLeft : CLIP.crouchRollRight);
         else {
           s.stance = "stand";
           s.playOnce(CLIP.crouchToStand);
@@ -1140,7 +1471,7 @@ class CombatAction implements Action {
       }
       return;
     }
-    // Flank: a nearby node with a different angle on the target that still sees it.
+    // Reposition: a nearby node with a different angle on the target that still sees it.
     const physics = s.game.services.physics;
     const options = s.graph?.walkable.filter((n) => {
       const dn = dist(n.position, s.position);
@@ -1159,31 +1490,60 @@ class CombatAction implements Action {
     }
   }
 
-  private fire(s: Soldier, target: Entity, eye: Vec3, d: number) {
+  /** Where one round goes: at the head or chest when the hit roll succeeds, else past the target close enough to hear. */
+  private aimPoint(s: Soldier, target: Entity, from: Vec3, d: number, rpg: boolean): Vec3 {
     const c = s.config;
-    // From the gun's muzzle when the body is posed, else from in front of the chest.
-    const facing = direction(s.yaw);
-    const tip = s.body?.muzzle(s.game.toSceneDir(facing));
-    const muzzle = tip ? s.game.fromScene(tip) : vec3.add(eye, vec3.add(vec3.scale(facing, 0.5 * METRE), [0, 0, -0.25 * METRE]));
     const player = s.game.services.player;
     const head: Vec3 = player && target === player.entity ? player.eye() : [target.position[0], target.position[1], target.position[2] + target.height * 0.9];
     const chest: Vec3 = [head[0], head[1], head[2] - 0.35 * METRE];
-    const aim = rand() < 0.15 ? head : chest;
-    // Hit chance: falls off with range, settles in the longer the target stays in view, worse on a small target.
-    const range = Math.min(1, d / (s.alarmViewLength * 1.25 * METRE));
-    const settle = Math.min(1, 0.35 + (0.65 * s.seenTime) / 3);
-    const small = player?.stance === "prone" ? 0.6 : player?.stance === "crouch" ? 0.8 : 1;
-    const p = (c.hitProbabilityNear + (c.hitProbabilityFar - c.hitProbabilityNear) * range) * settle * small;
-    let point = aim;
-    if (rand() >= p) {
-      // A miss: past the target's side or over its head, close enough to hear.
-      const side = vec3.normalize([-(aim[1] - muzzle[1]), aim[0] - muzzle[0], 0]);
-      const off = (0.5 + rand()) * METRE * (rand() < 0.5 ? -1 : 1);
-      point = vec3.add(aim, [side[0] * off, side[1] * off, (rand() - 0.3) * 0.6 * METRE]);
-    } else {
+    // A rocket goes for the feet (its blast does the work); bullets mostly for the chest.
+    const aim: Vec3 = rpg ? [target.position[0], target.position[1], target.position[2] + 0.2 * METRE] : this.aimHead || rand() < 0.15 ? head : chest;
+    if (rand() < hitChance(s, d)) {
       const jitter = (1 - c.aimPrecision) * 0.15 * METRE;
-      point = vec3.add(aim, [(rand() - 0.5) * jitter, (rand() - 0.5) * jitter, (rand() - 0.5) * jitter]);
+      return vec3.add(aim, [(rand() - 0.5) * jitter, (rand() - 0.5) * jitter, (rand() - 0.5) * jitter]);
     }
+    const side = vec3.normalize([-(aim[1] - from[1]), aim[0] - from[0], 0]);
+    const off = (rpg ? 2 + rand() * 2 : 0.5 + rand()) * METRE * (rand() < 0.5 ? -1 : 1);
+    return vec3.add(aim, [side[0] * off, side[1] * off, (rand() - 0.3) * 0.6 * METRE]);
+  }
+
+  private fire(s: Soldier, target: Entity, eye: Vec3, d: number, rpg: boolean) {
+    // From the gun's muzzle when the body is posed, else from in front of the chest.
+    const facing = direction(s.yaw);
+    const tip = s.posed ? s.body?.muzzle(s.game.toSceneDir(facing)) : null;
+    const muzzle = tip ? s.game.fromScene(tip) : vec3.add(eye, vec3.add(vec3.scale(facing, 0.5 * METRE), [0, 0, -0.25 * METRE]));
+    const point = this.aimPoint(s, target, muzzle, d, rpg);
     s.shoot(muzzle, vec3.normalize(vec3.sub(point, muzzle)));
+  }
+
+  /** "Gunner Combat - Stand": traverse the stationary gun onto the target and fire its weapon in bursts. */
+  private gunner(s: Soldier, dt: number, target: Entity): boolean {
+    const gun = s.manning!;
+    const c = s.config;
+    s.setBase(CLIP.aim);
+    s.yaw = gun.yaw;
+    const aimAt = s.lastKnown ?? target.position;
+    const chest: Vec3 = [aimAt[0], aimAt[1], aimAt[2] + 1.2 * METRE];
+    const aligned = gun.aim(chest, dt);
+    if (!s.canSee || !aligned || !gun.covers(chest)) return false;
+    if (this.burstLeft === 0) {
+      if ((this.burstDelay -= dt) > 0) return false;
+      this.chooseAim(s, target);
+      const clip = gun.ammo >= 0 ? gun.ammo : 10000;
+      const rounds = Math.round(Math.min(clip, 10000) * (c.minClipFraction + rand() * c.randomClipFraction));
+      this.burstLeft = Math.max(1, Math.min(rounds, c.maxRoundsPerBurst || rounds));
+      if (gun.ammo === 0) return false;
+      this.shotTimer = 0;
+    }
+    if ((this.shotTimer -= dt) > 0) return false;
+    const muzzle = gun.muzzle();
+    const point = this.aimPoint(s, target, muzzle, dist(s.position, target.position), false);
+    s.shootWith(gun.spec.weapon, muzzle, vec3.normalize(vec3.sub(point, muzzle)));
+    if (gun.ammo > 0) gun.ammo--;
+    this.burstLeft--;
+    const rpm = s.weaponInfo(gun.spec.weapon)?.roundsPerMinute ?? 600;
+    this.shotTimer = Math.max(60 / Math.max(1, rpm), c.minShotDelay + rand() * c.randomShotDelay);
+    if (this.burstLeft === 0) this.burstDelay = c.minBurstDelay + rand() * c.randomBurstDelay;
+    return false;
   }
 }

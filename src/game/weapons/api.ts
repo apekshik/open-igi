@@ -25,6 +25,10 @@ export interface FireOptions {
   spreadScale?: number;
   /** Skip the muzzle flash, tracer and sound (e.g. off-screen shooters). */
   quiet?: boolean;
+  /** Thrown weapons: launch velocity (world units per second) instead of the weapon's throw speed along `direction`. */
+  velocity?: Vec3;
+  /** Thrown weapons: seconds from the throw to the explosion instead of the default fuse. */
+  fuse?: number;
 }
 
 export interface ShotResult {
