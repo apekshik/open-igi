@@ -14,6 +14,11 @@ export interface Placement {
   /** Euler angles in radians, as stored (third is rotation about Z). */
   rotation: [number, number, number];
   model: string;
+  /**
+   * Ids of the ConditionalContainer tasks around the placement, outermost first. In IGI a container's subtree only
+   * exists while it runs: elevator-shaft blockers, intact/destroyed variants, cutscene-only props.
+   */
+  gates?: number[];
 }
 
 export interface HeightMapTask {
@@ -76,10 +81,11 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
 
   const num = (v: QvmValue | undefined) => (typeof v === "number" ? v : NaN);
 
-  function visit(task: QvmCall) {
+  function visit(task: QvmCall, gates: number[]) {
     if (task.fn !== "Task_New") return;
     const [id, type, name, ...rest] = task.args;
     const t = String(type);
+    const gated = gates.length ? { gates } : {};
     typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1);
     const p = rest.map(num);
 
@@ -91,10 +97,11 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
         position: [p[0], p[1], p[2]],
         rotation: [p[3], p[4], p[5]],
         model: rest[6],
+        ...gated,
       });
     } else if (t === "Fence" && typeof rest[4] === "string") {
       // Fence: position, gamma angle, model.
-      placements.push({ type: t, name: String(name), id: num(id), position: [p[0], p[1], p[2]], rotation: [0, 0, p[3]], model: rest[4] });
+      placements.push({ type: t, name: String(name), id: num(id), position: [p[0], p[1], p[2]], rotation: [0, 0, p[3]], model: rest[4], ...gated });
     } else if (t === "HeightMap") {
       // HeightMap: position, level, size, isEdit, bitmap id, normal smooth, blur smooth.
       heightMaps.push({ position: [p[0], p[1], p[2]], level: p[3], size: p[4], id: p[6] });
@@ -112,10 +119,11 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
       playerStart = [p[0], p[1], p[2]];
     }
 
-    for (const child of rest) if (isCall(child)) visit(child);
+    const inner = t === "ConditionalContainer" && num(id) >= 0 ? [...gates, num(id)] : gates;
+    for (const child of rest) if (isCall(child)) visit(child, inner);
   }
 
-  for (const s of statements) visit(s);
+  for (const s of statements) visit(s, []);
   return { placements, heightMaps, textureModifiers, terrainLightMaps, discardTerrain, playerStart, typeCounts };
 }
 

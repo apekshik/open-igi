@@ -69,6 +69,8 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
   const graphs = new Map<number, Vec3>();
   const alarms = new Map<number, Vec3>();
   const taskPositions = new Map<number, Vec3>();
+  // Patrol paths outside any soldier (level4 keeps its friendly team's routes in a shared "Patrol Paths" container).
+  const sharedPatrols = new Map<number, PatrolCommand[]>();
 
   function visit(task: QvmCall, scripted: boolean, gates: number[], generator?: CharacterSpec["generator"]) {
     if (task.fn !== "Task_New") return;
@@ -82,6 +84,7 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
     }
     if (t === "AIGraph") graphs.set(tid, [num(params[0]), num(params[1]), num(params[2])]);
     else if (t === "AlarmControl") alarms.set(tid, [num(params[0]), num(params[1]), num(params[2])]);
+    else if (t === "PatrolPath") sharedPatrols.set(tid, patrolCommands(children));
     else if (t === "HumanSoldier") {
       characters.push({ ...character(tid, String(name), params, children, scripted), gates, generator });
       return;
@@ -96,7 +99,12 @@ export function aiLevelData(statements: QvmCall[]): AiLevelData {
   }
 
   for (const s of statements) visit(s, false, []);
+  for (const c of characters) for (const [id, commands] of sharedPatrols) if (!c.patrols.has(id)) c.patrols.set(id, commands);
   return { characters, graphs, alarms, taskPositions };
+}
+
+function patrolCommands(children: QvmCall[]): PatrolCommand[] {
+  return children.map((cmd) => ({ command: num(cmd.args[3]), param: num(cmd.args[4]), note: String(cmd.args[2]) }));
 }
 
 function character(taskId: number, name: string, p: QvmValue[], children: QvmCall[], scripted: boolean): CharacterSpec {
@@ -125,8 +133,7 @@ function character(taskId: number, name: string, p: QvmValue[], children: QvmCal
       spec.aiType = String(rest[0]);
       spec.graphId = num(rest[1]);
     } else if (t === "PatrolPath") {
-      const commands = rest.filter(isCall).map((cmd) => ({ command: num(cmd.args[3]), param: num(cmd.args[4]), note: String(cmd.args[2]) }));
-      spec.patrols.set(num(id), commands);
+      spec.patrols.set(num(id), patrolCommands(rest.filter(isCall)));
     } else if (/^(Gun|Binocular)/.test(t) && typeof rest[0] === "string") {
       spec.weapons.push(rest[0]);
     }
