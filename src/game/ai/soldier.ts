@@ -18,7 +18,7 @@ import type { Entity } from "../entity.ts";
 import type { Game } from "../game.ts";
 import { ANIM_TICKS_PER_SECOND, cycleVelocity, looping, rootAt } from "../player/animator.ts";
 import type { AiCharacter, AiEvent, AiState } from "./api.ts";
-import type { SoldierBody } from "./body.ts";
+import { isStill, type SoldierBody } from "./body.ts";
 import type { MountedGun } from "./gun.ts";
 import type { AiConfig, CharacterSpec, PatrolCommand } from "./level.ts";
 import { dist, type NavGraph } from "./nav.ts";
@@ -32,6 +32,9 @@ export interface Seat {
   basis?: [Vec3, Vec3, Vec3];
 }
 const SEAT = new THREE.Matrix4();
+const LOWEST = new THREE.Vector3();
+/** How far a cutscene actor may come down onto the surface below it (IGI units). */
+const SETTLE_DROP = 3 * METRE;
 const SEAT_X = new THREE.Vector3();
 const SEAT_Y = new THREE.Vector3();
 const SEAT_Z = new THREE.Vector3();
@@ -203,6 +206,15 @@ export class Soldier implements AiCharacter {
   actor = false;
   /** Root motion kept from finished one-shot clips, in the body's own frame (x right, y forward, z up). */
   private rootShift: Vec3 = [0, 0, 0];
+  /**
+   * Actors: how far a feet-placed clip is drawn above (+) or below (-) the actor's place to rest on what is under it;
+   * the height of the lowest bone at the last pose; the height it must keep across a change of clip; and whether the
+   * next pose rests fully although a one-shot clip plays.
+   */
+  private settled = 0;
+  private contact: number | null = null;
+  private pin: number | null = null;
+  private settleArmed = false;
   readonly graph: NavGraph | null;
   stance: Stance = "stand";
   clip = 0;
@@ -550,21 +562,31 @@ export class Soldier implements AiCharacter {
     const [x, y, z] = this.rootShift;
     this.position = [0, 1, 2].map((i) => a.position[i] + bx[i] * x + by[i] * y + bz[i] * z) as Vec3;
     this.yaw = a.yaw;
+    // A seat coming into play (its vehicle's container started): the actor rests on it afresh, even mid-clip (Jones
+    // is already stepping out of the helicopter when the cut to it comes).
+    if (a.hidden) {
+      this.contact = null;
+      this.settled = 0;
+    } else if (this.contact === null) this.settleArmed = true;
     if (this.body) {
       this.body.object.visible = !a.hidden;
-      this.body.place(this.game.local(this.position), this.yaw);
+      this.placeBody();
       // Pitched and banked with its vehicle.
       if (a.basis) this.body.object.quaternion.setFromRotationMatrix(SEAT.makeBasis(SEAT_X.fromArray(bx), SEAT_Y.fromArray(by), SEAT_Z.fromArray(bz)));
     }
   }
 
-  /** An actor's one-shot clip ended: its root motion stays with it (falls and climbs too, not posture changes). */
+  /**
+   * An actor's one-shot clip ended: its root motion stays with it. Across the change of clip its lowest point keeps its
+   * height (a jump ends where it lands, a posture change keeps the feet down); settle() does that.
+   */
   private keepRootMotion(clip: number) {
     const anim = this.body?.clips.clip(clip);
+    if (this.contact !== null) this.pin = this.contact;
     if (!anim || looping(anim) || !anim.root.length) return;
     const a = rootAt(anim, 0);
     const b = rootAt(anim, anim.duration);
-    const d: Vec3 = [b[0] - a[0], b[1] - a[1], Math.abs(b[2] - a[2]) > 1 * METRE ? b[2] - a[2] : 0];
+    const d: Vec3 = [b[0] - a[0], b[1] - a[1], 0];
     if (this.anchor) {
       this.rootShift = [this.rootShift[0] + d[0], this.rootShift[1] + d[1], this.rootShift[2] + d[2]];
       return;
@@ -591,7 +613,7 @@ export class Soldier implements AiCharacter {
     }
     if (!this.oneShot && b.clips.clipId !== this.baseClip) b.clips.play(this.baseClip);
     b.clips.advance(dt);
-    b.place(this.game.local(this.position), this.yaw);
+    this.placeBody();
     // Off-screen bodies are not posed; far-away ones are posed at a quarter of the rate.
     this.posed = false;
     if (!this.world.inView(this.position)) return;
@@ -599,7 +621,57 @@ export class Soldier implements AiCharacter {
     if (!far || ((this.id + Math.floor(this.game.time * 30)) & 3) === 0) {
       b.pose(dt);
       this.posed = true;
+      if (this.actor) this.settle();
     }
+  }
+
+  /** Put the body at the soldier's place; an actor's feet-placed clip is drawn where it rests (settle()). */
+  private placeBody() {
+    const b = this.body;
+    if (!b) return;
+    const lift = this.actor && !b.posture() ? this.settled : 0;
+    b.place(this.game.local(lift ? [this.position[0], this.position[1], this.position[2] + lift] : this.position), this.yaw);
+  }
+
+  /**
+   * Cutscene actors rest on what is under them, as IGI's characters fall onto it. A posture (sitting, lying, crouching)
+   * has its pelvis where the level places the actor (Anya on her chair, Jones on the helicopter bench), which needs
+   * nothing more. Feet-placed clips come down onto the floor, deck or roof under the pose's lowest bone (Jones standing
+   * in the helicopter doorway, guards placed a metre above the yard); during a one-shot movement (a jump) they are only
+   * kept out of what they land on, and across a change of clip the lowest bone keeps its height, so a jump ends where
+   * it lands.
+   */
+  private settle() {
+    const physics = this.game.services.physics;
+    const b = this.body;
+    if (!physics || !b || this.route || !b.object.visible) return;
+    const [x, y, z] = this.game.fromScene(b.lowest(LOWEST).applyMatrix4(b.object.matrixWorld));
+    const pinned = this.pin;
+    this.pin = null;
+    const armed = this.settleArmed;
+    this.settleArmed = false;
+    if (b.posture()) {
+      this.contact = z;
+      return;
+    }
+    let dz = pinned !== null ? pinned - z : 0;
+    // A one-shot whose root moves (a jump) is moving; a still one (a driver at the wheel, an idle) rests.
+    const shot = this.oneShot ? b.clips.clip(this.oneShot.id) : null;
+    const resting = !shot || armed || isStill(shot);
+    // Resting: down onto the surface under the lowest bone (never up: a driver's toes rest inside the cab, and a lift
+    // would climb through it). Moving: up out of anything within reach above it, so a landing does not sink into a
+    // train roof.
+    const ground = physics.groundHeight(x, y, z + dz + (resting ? 0.05 : 0.6) * METRE);
+    if (ground !== null) {
+      const fall = ground - (z + dz);
+      if (resting ? fall < 0 && fall > -SETTLE_DROP : fall > 0) dz += fall;
+    }
+    this.contact = z + dz;
+    if (Math.abs(dz) < 1) return;
+    this.settled += dz;
+    if (this.anchor) this.ride();
+    else this.placeBody();
+    b.object.updateMatrixWorld(true);
   }
 
   /** Whether the body's bones show this frame's pose (off-screen bodies are not posed, so their gun bone is stale). */
@@ -619,6 +691,12 @@ export class Soldier implements AiCharacter {
     }
     this.oneShot = { id: clip, then, left: this.body.clips.clip(clip)!.duration / ANIM_TICKS_PER_SECOND };
     this.body.clips.play(clip);
+    // An actor's clip starts where the last one left its lowest bone, or from the floor when there was none yet (Jones
+    // jumping the moment the cutscene starts).
+    if (this.actor) {
+      if (this.contact === null) this.settleArmed = true;
+      else this.pin = this.contact;
+    }
   }
 
   /** Fire one round from the muzzle along `dir`. */

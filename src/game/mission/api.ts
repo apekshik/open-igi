@@ -30,6 +30,12 @@ export interface RiderSeat {
   basis?: [Vec3, Vec3, Vec3];
 }
 
+/** A rigid pose in absolute IGI units: origin and model axes. */
+export interface CarrierPose {
+  origin: Vec3;
+  axes: [Vec3, Vec3, Vec3];
+}
+
 export interface MissionService {
   /** Mission number (1..14), title and description from the language files. */
   number: number;
@@ -65,6 +71,11 @@ export interface MissionService {
    * null if it rides nothing. `aiId` is its HumanAI task id.
    */
   rider?(aiId: number): (() => RiderSeat) | null;
+  /**
+   * A vehicle that carries things placed inside its task (Placement.carrier: a Heli/Car/Plane task id, or a train's
+   * locomotive id and car index): where the level places it and where it is now (null while it is not in play).
+   */
+  carrier?(task: number, car: number): { reference: CarrierPose; current: CarrierPose | null } | null;
   /** Let an entity (an AI soldier) use a door or switch by task id. Returns false if not usable now. */
   use(entityId: number, taskId: number): boolean;
   /** Alarm pads (switches that set off an AlarmControl), for AI soldiers running to raise the alarm. */

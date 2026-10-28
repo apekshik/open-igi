@@ -87,6 +87,12 @@ export class SoldierBody {
   /** Extra rotation of the spine (radians about the body's X axis) for hit flinches; decays by itself. */
   flinch = 0;
   gun: THREE.Mesh | null = null;
+  /**
+   * Cutscene actors place their clips' roots the way the level places the actors: a posture clip (a root that does not
+   * move: Anya typing, Jones on the helicopter bench or lying on the flatcar) has its pelvis at the placement; other
+   * clips have their feet there, with the root's x/y measured from its first key. See docs/formats/ai.md.
+   */
+  actorRoots = false;
   private flinchSide = 0;
   private skeleton: AnimFile["skeleton"];
   private cursors: { anim: Animation | null; keys: Int32Array }[] = [
@@ -147,9 +153,10 @@ export class SoldierBody {
       }
       this.bones[i].quaternion.copy(this.qa);
     }
-    const root = rootOf(a.anim, a.time);
+    const actor = this.actorRoots ? this.skeleton : null;
+    const root = rootOf(a.anim, a.time, actor);
     if (b) {
-      const rb = rootOf(b.anim, b.time);
+      const rb = rootOf(b.anim, b.time, actor);
       for (let k = 0; k < 3; k++) root[k] += (rb[k] - root[k]) * b.weight;
     }
     const t = this.skeleton.translations;
@@ -161,6 +168,31 @@ export class SoldierBody {
       this.bones[1]?.quaternion.multiply(this.qb);
       this.flinch = Math.max(0, this.flinch - dt);
     }
+  }
+
+  /** Whether the current clip is a posture (its root does not move), placed by its pelvis for actors. */
+  posture(): boolean {
+    const id = this.clips.clipId;
+    const anim = id === null ? null : this.clips.clip(id);
+    return !!anim && isPosture(anim, this.skeleton);
+  }
+
+  /**
+   * The lowest bone of the pose last set by pose() (where the body meets the ground: toes, or the back of someone lying
+   * down), in the body's own frame (x right, y forward, z up).
+   */
+  lowest(out: THREE.Vector3): THREE.Vector3 {
+    this.object.updateMatrixWorld(true);
+    INVERSE.copy(this.object.matrixWorld).invert();
+    let best = Infinity;
+    for (const bone of this.bones) {
+      BONE.setFromMatrixPosition(bone.matrixWorld).applyMatrix4(INVERSE);
+      if (BONE.z < best) {
+        best = BONE.z;
+        out.copy(BONE);
+      }
+    }
+    return out;
   }
 
   /** Per-bone key cursors for a track, so sampling walks forward from the last key instead of from the start. */
@@ -209,12 +241,54 @@ export class SoldierBody {
   }
 }
 
-/** Root position: looping clips keep x/y at their first key so locomotion plays on the spot. */
-function rootOf(anim: Animation, time: number): [number, number, number] {
+const INVERSE = new THREE.Matrix4();
+/** How far (IGI units, 0.75 m) the lowest bone of a still clip may hang below its pelvis for it to be a posture. */
+const POSTURE_REACH = 0.75 * 4096;
+const BONE = new THREE.Vector3();
+const postures = new WeakMap<Animation, boolean>();
+
+/**
+ * A still clip whose legs do not reach down to the floor under the pelvis: sitting (on a chair, a helicopter bench,
+ * at the wheel), lying or crouching, rather than standing (toes about 0.95 m below the pelvis) or moving. Measured on
+ * the clip's first frame; the root height alone does not tell (Mission 8's truck driver sits with the pelvis at a
+ * standing 0.97 m).
+ */
+export function isPosture(anim: Animation, skeleton: AnimFile["skeleton"]): boolean {
+  let p = postures.get(anim);
+  if (p === undefined) {
+    p = false;
+    if (isStill(anim)) {
+      const bones = poseBones(skeleton, anim, 0);
+      let lowest = Infinity;
+      for (let i = 0; i < skeleton.boneCount; i++) lowest = Math.min(lowest, bones[i * 12 + 11]);
+      p = anim.root[0].p[2] - lowest < POSTURE_REACH;
+    }
+    postures.set(anim, p);
+  }
+  return p;
+}
+
+/** A clip whose root does not move. */
+export function isStill(anim: Animation): boolean {
+  const k = anim.root;
+  return k.length > 0 && k.every((r) => Math.abs(r.p[0] - k[0].p[0]) + Math.abs(r.p[1] - k[0].p[1]) + Math.abs(r.p[2] - k[0].p[2]) < 1);
+}
+
+/**
+ * Root position: looping clips keep x/y at their first key so locomotion plays on the spot. With `actor` roots a
+ * posture's pelvis sits at the origin and other clips measure x/y from their first key.
+ */
+function rootOf(anim: Animation, time: number, actor: AnimFile["skeleton"] | null): [number, number, number] {
   const r = rootAt(anim, time);
-  if (looping(anim) && anim.root.length) {
-    r[0] = anim.root[0].p[0];
-    r[1] = anim.root[0].p[1];
+  if (!anim.root.length) return r;
+  const first = anim.root[0].p;
+  if (actor) {
+    if (isPosture(anim, actor)) return [0, 0, 0];
+    r[0] = looping(anim) ? 0 : r[0] - first[0];
+    r[1] = looping(anim) ? 0 : r[1] - first[1];
+  } else if (looping(anim)) {
+    r[0] = first[0];
+    r[1] = first[1];
   }
   return r;
 }

@@ -7,10 +7,13 @@
 // children, and draws the world with StaticRenderer instead.
 import * as THREE from "three";
 import { decodeTex } from "../../formats/tex.ts";
+import type { Placement } from "../../level/objects.ts";
 import { SkyRenderer } from "../../render/sky.ts";
 import { createStaticUniforms, StaticMaterials, StaticRenderer } from "../../render/statics.ts";
 import { METRE, toThreeDir, type Vec3 } from "../coords.ts";
 import type { Game, GameSystem } from "../game.ts";
+import type { CarrierPose } from "../mission/api.ts";
+import type { DynamicCollider } from "../physics/api.ts";
 import type { WorldService } from "./api.ts";
 import { readEnvironment, type Rgb } from "./environment.ts";
 import { gatesOpen } from "../mission/gates.ts";
@@ -26,7 +29,7 @@ export function worldSystem(): GameSystem {
   let statics: StaticRenderer | null = null;
   let splines: Splines | null = null;
   let collidersAttached = false;
-  const gated: { mesh: THREE.Mesh; gates: number[] }[] = [];
+  const gated: Gated[] = [];
   const eye = new THREE.Vector3();
 
   return {
@@ -38,16 +41,19 @@ export function worldSystem(): GameSystem {
       game.scene.background = raw(env.sky.fogColor);
       game.scene.fog = new THREE.Fog(raw(env.fog.color), fog.near, fog.far);
 
-      // three.js-lit materials (characters, pickups): the sun's front colour plus the back colour as ambient.
+      // three.js-lit materials (characters, vehicles, pickups): the sun's front colour plus the back colour as ambient,
+      // as the static shader lights unlightmapped models (texture x (back + front x n.l)). three.js's Lambert divides
+      // light by pi (physically based), so the intensities are pi; at 1 every character and vehicle was lit at a third
+      // of the world's brightness (Jones nearly black in the insertion helicopter).
       const sunDir = toThreeDir(env.sun.direction).normalize();
       for (const light of game.scene.children) {
         if (light instanceof THREE.HemisphereLight) {
           light.color.copy(raw(env.sun.back));
           light.groundColor.copy(raw(env.sun.back)).multiplyScalar(0.6);
-          light.intensity = 1;
+          light.intensity = Math.PI;
         } else if (light instanceof THREE.DirectionalLight) {
           light.color.copy(raw(env.sun.front));
-          light.intensity = 1;
+          light.intensity = Math.PI;
           light.position.copy(sunDir);
         }
       }
@@ -75,11 +81,13 @@ export function worldSystem(): GameSystem {
       const scene = await collectStatics(game.vfs, game.level.dir, game.level.statements, game.level.objects.placements, library, game.origin);
       statics = new StaticRenderer(library, new StaticMaterials(uniforms));
       // Models inside ConditionalContainers exist only while those run (SAM sites swapped for their wrecks, props of
-      // the intro flyover, C4 that appears once planted): drawn as their own meshes and shown by gatesOpen().
-      const gatedNodes = new Map<StaticNode, number[]>();
+      // the intro flyover, C4 that appears once planted): drawn as their own meshes and shown by gatesOpen(). Models
+      // inside a vehicle's task ride it (cargo on a train car, the Hueys' cabin props): their own meshes too, moved
+      // with the vehicle (docs/formats/dynamic.md, Riding along).
+      const gatedNodes = new Map<StaticNode, Placement>();
       for (const [placement, node] of scene.byPlacement) {
-        if (!placement.gates?.length) continue;
-        const add = (n: StaticNode) => (gatedNodes.set(n, placement.gates!), n.attachments.forEach(add));
+        if (!placement.gates?.length && !placement.carrier) continue;
+        const add = (n: StaticNode) => (gatedNodes.set(n, placement), n.attachments.forEach(add));
         add(node);
       }
       for (const nodes of scene.clusters) {
@@ -92,14 +100,15 @@ export function worldSystem(): GameSystem {
       statics.finish();
       splines.createTrains(library, statics);
       game.world.add(statics.group, splines.group);
-      for (const [n, gates] of gatedNodes) {
+      for (const [n, placement] of gatedNodes) {
         const mesh = statics.createMesh(n.model);
         if (!mesh) continue;
         mesh.matrixAutoUpdate = false;
         mesh.matrix.copy(n.matrix);
         mesh.visible = false;
         statics.group.add(mesh);
-        gated.push({ mesh, gates });
+        const carried = placement.carrier ? { ...placement.carrier, base: n.matrix.clone(), model: n.model, collider: null } : undefined;
+        gated.push({ mesh, gates: placement.gates ?? [], carried });
       }
 
       // Keep the per-placement meshes for collision only, with their attachments as children.
@@ -125,7 +134,10 @@ export function worldSystem(): GameSystem {
     update(dt, game) {
       // Train cars collide once the physics system (initialised after this one) is up.
       if (splines && game.services.physics && !collidersAttached) {
-        splines.attachColliders(game.services.physics);
+        const physics = game.services.physics;
+        splines.attachColliders(physics);
+        // What rides a vehicle collides where it rides (physics leaves it out of the static world).
+        for (const g of gated) if (g.carried) g.carried.collider = physics.addDynamic?.(g.carried.model, g.mesh.matrix.elements) ?? null;
         collidersAttached = true;
       }
       splines?.update(dt);
@@ -133,6 +145,8 @@ export function worldSystem(): GameSystem {
     },
 
     lateUpdate(dt, game) {
+      // After the mission system has moved its vehicles and the trains have run.
+      for (const g of gated) if (g.carried) carry(game, g);
       sky?.update(dt, game.camera.position);
       if (statics) {
         const p = game.fromScene(game.camera.position);
@@ -140,6 +154,46 @@ export function worldSystem(): GameSystem {
       }
     },
   };
+}
+
+interface Gated {
+  mesh: THREE.Mesh;
+  gates: number[];
+  /** A model riding a vehicle: which one, its matrix where the level places it, and its collider. */
+  carried?: { task: number; car: number; base: THREE.Matrix4; model: string; collider: DynamicCollider | null };
+}
+
+const CARRY = new THREE.Matrix4();
+const CARRY_REFERENCE = new THREE.Matrix4();
+
+/** A pose as a game.world-frame matrix (origin-relative). */
+function poseMatrix(game: Game, p: CarrierPose, out: THREE.Matrix4) {
+  const [x, y, z] = p.axes;
+  return out.set(
+    x[0], y[0], z[0], p.origin[0] - game.origin[0],
+    x[1], y[1], z[1], p.origin[1] - game.origin[1],
+    x[2], y[2], z[2], p.origin[2] - game.origin[2],
+    0, 0, 0, 1,
+  );
+}
+
+/**
+ * Move a carried model with its vehicle: matrix = vehicle now x inverse(vehicle where the level places it) x placement.
+ * Hidden while the vehicle is not in play; left where it is when the mission system does not know the vehicle.
+ */
+function carry(game: Game, g: Gated) {
+  const c = g.carried!;
+  const pose = g.mesh.visible ? game.services.mission?.carrier?.(c.task, c.car) : null;
+  if (pose) {
+    if (pose.current) {
+      poseMatrix(game, pose.current, CARRY).multiply(poseMatrix(game, pose.reference, CARRY_REFERENCE).invert());
+      g.mesh.matrix.multiplyMatrices(CARRY, c.base);
+    } else g.mesh.visible = false;
+  }
+  if (c.collider) {
+    c.collider.enabled = g.mesh.visible;
+    if (g.mesh.visible) c.collider.setMatrix(g.mesh.matrix.elements);
+  }
 }
 
 /** Attachments as invisible children of their placement's mesh, so raycasts against staticObjects hit them. */
