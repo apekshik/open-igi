@@ -9,15 +9,25 @@ export interface Placement {
   type: string;
   name: string;
   id: number;
-  /** World position, IGI units (Z up, roughly 4000 units per metre). */
+  /** World position, IGI units (Z up, 4096 units per metre). */
   position: [number, number, number];
   /** Euler angles in radians, as stored (third is rotation about Z). */
   rotation: [number, number, number];
   model: string;
 }
 
+export interface HeightMapTask {
+  position: [number, number, number];
+  /** Octree level of the cube the patch covers. */
+  level: number;
+  size: number;
+  /** Slot in terrain.hmp. */
+  id: number;
+}
+
 export interface LevelObjects {
   placements: Placement[];
+  heightMaps: HeightMapTask[];
   /** Position of the HumanPlayer task, if found. */
   playerStart: [number, number, number] | null;
   /** Count of every task type in the tree, for research. */
@@ -29,6 +39,7 @@ const POSE_THEN_MODEL = new Set(["Building", "EditRigidObj"]);
 
 export function levelObjects(statements: QvmCall[]): LevelObjects {
   const placements: Placement[] = [];
+  const heightMaps: HeightMapTask[] = [];
   const typeCounts = new Map<string, number>();
   let playerStart: [number, number, number] | null = null;
 
@@ -53,6 +64,9 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
     } else if (t === "Fence" && typeof rest[4] === "string") {
       // Fence: position, gamma angle, model.
       placements.push({ type: t, name: String(name), id: num(id), position: [p[0], p[1], p[2]], rotation: [0, 0, p[3]], model: rest[4] });
+    } else if (t === "HeightMap") {
+      // HeightMap: position, level, size, isEdit, bitmap id, normal smooth, blur smooth.
+      heightMaps.push({ position: [p[0], p[1], p[2]], level: p[3], size: p[4], id: p[6] });
     } else if (t === "HumanPlayer" && playerStart === null) {
       // HumanPlayer: position, gamma, model, team. Mission 1 names it "TheGoodGuy".
       playerStart = [p[0], p[1], p[2]];
@@ -62,7 +76,7 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
   }
 
   for (const s of statements) visit(s);
-  return { placements, playerStart, typeCounts };
+  return { placements, heightMaps, playerStart, typeCounts };
 }
 
 function isCall(v: QvmValue): v is QvmCall {

@@ -1,14 +1,16 @@
-// Level view: every model placed by the level's objects.qvm, with a fly camera starting at the player.
+// Level view: the terrain plus every model placed by the level's objects.qvm, with a fly camera starting at the player.
 // WASD/QE to move (shift = fast), drag to look.
 import * as THREE from "three";
 import { decodeQvm } from "../formats/qvm.ts";
-import { levelObjects } from "../level/objects.ts";
+import { parseCtr, parseHmp } from "../formats/terrain.ts";
+import { levelObjects, type LevelObjects } from "../level/objects.ts";
+import { buildTerrain, cubeMinAt, type HeightPatch } from "../level/terrain.ts";
 import { levelLibrary } from "../render/library.ts";
 import type { Vfs } from "../vfs/vfs.ts";
 import { createStage, levelNames } from "./stage.ts";
 
-/** IGI units per metre (approximate: the army truck is ~30,000 long). */
-const METRE = 4000;
+/** IGI units per metre (2^12; see THIRD_PARTY.md, flawme). */
+const METRE = 4096;
 
 export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, status: (s: string) => void) {
   const params = new URLSearchParams(location.search);
@@ -66,6 +68,9 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
     const objects = levelObjects(decodeQvm(await vfs.read(`missions/location0/${level}/objects.qvm`)));
     const origin = objects.playerStart ?? objects.placements[0]?.position ?? [0, 0, 0];
 
+    const terrain = await loadTerrain(vfs, level, objects, origin);
+    world.add(terrain.mesh);
+
     let placed = 0;
     const missing = new Set<string>();
     for (const p of objects.placements) {
@@ -92,7 +97,7 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
     pitch = -0.15;
     history.replaceState(null, "", `?${new URLSearchParams({ view: "level", level })}`);
     status(
-      `${level}: ${placed}/${objects.placements.length} placed` +
+      `${level}: ${placed}/${objects.placements.length} placed, terrain ${terrain.triangles} tris` +
         (missing.size ? ` (missing ${[...missing].slice(0, 5).join(", ")})` : "") +
         ` | WASD/QE move, shift fast, drag to look | red post = player start`,
     );
@@ -100,4 +105,23 @@ export function levelViewer(vfs: Vfs, toolbar: HTMLElement, host: HTMLElement, s
 
   levelSelect.addEventListener("change", () => load(levelSelect.value));
   if (levels.length) load(levelSelect.value);
+}
+
+async function loadTerrain(vfs: Vfs, level: string, objects: LevelObjects, origin: [number, number, number]) {
+  const dir = `missions/location0/${level}/terrain`;
+  const slots = vfs.has(`${dir}/terrain.hmp`) ? parseHmp(await vfs.read(`${dir}/terrain.hmp`)) : [];
+  const patches: HeightPatch[] = objects.heightMaps
+    .filter((h) => slots[h.id])
+    .map((h) => ({ level: h.level, min: cubeMinAt(h.position, h.level), size: h.size, heights: slots[h.id]! }));
+  const built = buildTerrain(
+    { ctr: parseCtr(await vfs.read(`${dir}/terrain.ctr`)), cmd: await vfs.read(`${dir}/terrain.cmd`), patches },
+    { centre: [origin[0], origin[1]], radius: 6000 * METRE, leafDistance: 250 * METRE, minLevel: 8, origin },
+  );
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(built.positions, 3));
+  geometry.setIndex(new THREE.BufferAttribute(built.indices, 1));
+  geometry.computeVertexNormals();
+  // Untextured for now: terrain materials (terrain.tex, TextureModifier bitmaps, lightmaps) come next.
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color: 0x7d8a5a, side: THREE.DoubleSide }));
+  return { mesh, triangles: built.indices.length / 3 };
 }

@@ -3,7 +3,8 @@
 A from-scratch web engine for *Project I.G.I.: I'm Going In* (2000), in the spirit of OpenRW and OpenMW.
 It runs in the browser on three.js and loads the game data from **your own copy** of the game.
 
-This repo contains no game data and no code taken from the original executable. See [docs/CLEAN_ROOM.md](docs/CLEAN_ROOM.md).
+This repo contains no game data. It builds on community reverse-engineering of the original game, credited in
+[THIRD_PARTY.md](THIRD_PARTY.md). See [docs/RULES.md](docs/RULES.md) for the project rules.
 You need your own copy of the game to play.
 
 open-igi is a free, non-commercial fan project. It is not affiliated with or endorsed by the owners of Project I.G.I.
@@ -11,8 +12,8 @@ open-igi is a free, non-commercial fan project. It is not affiliated with or end
 
 ## Status
 
-Pre-alpha. Every level's buildings and props load in the browser from the game's own placement scripts, with their real
-textures. Next: terrain, then characters. Milestone 1 is walking around Mission 1.
+Pre-alpha. Every level loads in the browser: the terrain from the game's own octree files, and every building and prop from
+its placement script, with real textures. Next: terrain texturing, then characters. Milestone 1 is walking around Mission 1.
 
 ## Layout
 

@@ -14,7 +14,8 @@ Reference install: the English PC release (`IGI.exe`, 1,384,448 bytes), 1,940 fi
 | .wav | 394 | 47.1 | `ILSF` | unknown | |
 | .dat | 317 | 35.2 | `0xccddeeff` / text | unknown | |
 | .tex | 26 loose + ~6,900 in archives | 7.2 | `LOOP` | v11 confirmed | `src/formats/tex.ts` |
-| .lmp / .cmd / .ctr / .hmp / .bit | 14 / 14 / 14 / 6 / 14 | ~21 | none | unknown (terrain set, one per level) | |
+| .ctr / .cmd / .hmp | 14 / 14 / 6 | ~13 | none | terrain geometry confirmed | `src/formats/terrain.ts` |
+| .lmp / .bit | 14 / 14 | ~8 | none | layout known, not yet used | |
 | .iff | 6 | 5.2 | `FORM` / `BOBJ` | unknown (animations) | |
 | .qvm | 997 | 3.7 | `LOOP` (v8) | declarative subset confirmed (all objects.qvm) | `src/formats/qvm.ts` |
 | .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry confirmed | `src/formats/mef.ts` |
@@ -188,3 +189,46 @@ Orientation: Real32x9, Model: String16)`. Engine-defined types (`EditRigidObj`) 
 World units equal model units, roughly 4,000 per metre (the army truck is ~30,000 long). Z is up. Mission 1's
 compound ground is at z ≈ 174,413,100. Whether IGI's axes are mirrored relative to three.js is not yet confirmed.
 
+
+## Terrain (geometry confirmed)
+
+Layouts and the octree walk follow hjcminus/Project-IGI-Terrain (see THIRD_PARTY.md); flawme/igi-reverse-engineering
+documents the same files. Every level has `terrain/terrain.{ctr,cmd,lmp,tex,bit,qvm}`; six levels also have `.hmp`.
+
+**World:** one root cube of half-size 2^30 units centred on the origin, subdivided as an octree. A cube at level L has
+half-size 2^(30-L); leaves are level 16 (32,768 units, 8 m). World scale is 4096 units per metre, X right, Y forward,
+Z up (right-handed; matches the hjcminus renderer, so levels are not mirrored).
+
+**`.ctr`** — 32-byte cube records. Record 1 is the root (record 0 is all zero).
+
+```
+int16 children[8]; int8 transform[8] (-1 = empty); u8 childMask; u8 pad[3]; u32 cmdOffset
+```
+
+The tree is a DAG: identical subtrees are shared and placed under one of 8 transforms (4 rotations about Z, each
+optionally mirrored in X). Child slot k sits in octant (x = k&1, y = k&2, z = k&4). Under parent transform t, octant k
+holds stored child `CHILD_FOR_OCTANT[t][k]`, and that child's transform becomes `COMPOSE[t][child.transform]`
+(tables in `src/level/terrain.ts`).
+
+**`.cmd`** — every cube (not just leaves) has a mesh at `cmdOffset`, so any level can stand in for its subtree:
+
+```
+u16 triangleCount, u16 vertexOffset (= triangleCount*4), u16 parentVertexCount, u16 childVertexCount
+u32 triangle[triangleCount]   bytes 0..2 vertex indices, byte 3 flag (0xE0/0xF0; high nibble likely material)
+u32 vertex[parent + child]    x = bits 26..31, y = 20..25, z = 14..19, each minus 24 (so -24..24)
+```
+
+Vertex world position = `coord * 2^(27-L) / 3 + cubeCentre`, after applying the cube's transform to x/y. Triangle
+order is (b2, b0, b1), or (b1, b0, b2) when the transform mirrors.
+
+**`.hmp`** — 256 slots of `{u32 runtimePtr, u8 ?, u8 pad[3], u32 size}`, then for each non-empty slot a
+`(size+1)²` grid of u8 heights. A `HeightMap` task in objects.qvm (`x, y, z, level, size, isEdit, id, ...`) attaches
+slot `id` to the level-`level` cube containing its position; the grid spans that cube. Cubes at level ≥ 14 inside
+it add `(bilinear(h) - 64) * 256` to their vertex heights.
+
+**Check:** with patches applied, Mission 1's 400 placed objects sit a median 0.00 m above the decoded ground
+(10th–90th percentile: -0.5 m to +2.3 m).
+
+Not yet used: `.lmp` (8-bit lightmaps: repeated `u32 size, u8[size²]`), `terrain.tex` (LOOP v9, 18 textures of
+128×128 ARGB1555), `.bit` (texture-modifier bitmaps, same slot table as `.hmp` but 1 bit per cell), and
+`terrain.qvm` (`CreateTerrainMaterial` and tile-map tables).
