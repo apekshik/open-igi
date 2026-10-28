@@ -677,6 +677,8 @@ export class AreaActivateTask extends LogicTask {
   private vehicleInside = new Map<LogicTask, boolean>();
   /** Whether the player was inside at the last tick its HumanPlayer task existed. */
   private playerInside = false;
+  /** Whether each friendly soldier (by task id) was inside at the last tick it was in play. */
+  private allyInside = new Map<number, boolean>();
 
   tick() {
     // Test a point just above the feet so slopes and stairs at the box floor still count.
@@ -707,7 +709,22 @@ export class AreaActivateTask extends LogicTask {
       // the player keeps its last answer: outro containers test the very area that started them.
       const player = this.L.world.player();
       if (player && this.L.playerActive()) this.playerInside = inside(player);
-      this.count = all.filter((e) => e.team === 0 && isHuman(e) && e !== player && inside(e)).length + (this.playerInside ? 1 : 0);
+      // Friendly soldiers too: Mission 4's outro runs on "AreaActivate_156.nActive" (Harrison and Josip at the
+      // helipad) and its start takes their container down with the player's; dropping them restarted the level.
+      // A dead one stops counting; one taken out of play keeps its last answer.
+      let n = this.playerInside ? 1 : 0;
+      const present = new Set<number>();
+      for (const e of all) {
+        if (e.team !== 0 || !isHuman(e) || e === player) continue;
+        const now = inside(e);
+        if (now) n++;
+        if (e.taskId === undefined) continue;
+        present.add(e.taskId);
+        if (e.alive) this.allyInside.set(e.taskId, now);
+        else this.allyInside.delete(e.taskId);
+      }
+      for (const [id, was] of this.allyInside) if (was && !present.has(id)) n++;
+      this.count = n;
     }
   }
 }
