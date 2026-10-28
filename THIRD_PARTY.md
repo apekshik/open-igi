@@ -80,3 +80,10 @@ Read for research only; no code from it is used. Its exe analysis (`docs/gamepla
 `DefineHumanPlayerGeneral` arguments, the movement state/clip table, root-motion speeds, jump and fall-damage rules,
 lean timing, footstep-noise ranges and eye offsets that `src/game/player/` reimplements in our own terms. See
 `docs/formats/player.md`.
+
+## flawme/igi-reverse-engineering: mission logic
+
+The same project's task-system and level-system notes (`reverse/docs/11-task-system`, `reverse/docs/12-level-system`:
+the `language/*.res` files and `LevelFlow_GetBreakCutSceneKey` among the script natives) guided the mission system in
+`src/game/mission/`. The value of `GAME_FREQUENCY` (30) was read from IGI.exe's script constant table by us; the
+remaining task semantics come from reading the levels' own objects.qvm scripts. See `docs/formats/mission.md`.
