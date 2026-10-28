@@ -50,6 +50,11 @@ export interface AiService {
   /** Whether the base alarm is sounding (from "alarm" events). */
   readonly alarm: boolean;
   /**
+   * Route over an AIGraph (graphs/graph<id>.dat) from the node nearest `from` to node `toNode`, as node positions,
+   * for vehicles driven by CarAI tasks along PatrolPaths. undefined while the graph is still loading, null if unknown.
+   */
+  graphRoute?(graphId: number, from: Vec3, toNode: number): Vec3[] | null | undefined;
+  /**
    * Game difficulty: picks each AI type's settings.qvm row (GD_1/GD_2/GD_3). Starts from `?difficulty=` (1-3 or
    * easy/normal/hard), default normal; setting it applies to soldiers already in play.
    */

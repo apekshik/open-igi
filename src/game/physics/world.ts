@@ -63,6 +63,8 @@ export interface WorldHit {
   material: number;
   /** Index into WorldOptions.objects, or -1 for terrain. */
   object: number;
+  /** Id of the dynamic body hit, or -1. */
+  body: number;
 }
 
 export interface GroundInfo {
@@ -70,12 +72,16 @@ export interface GroundInfo {
   normal: [number, number, number];
   material: number;
   object: number;
+  /** Id of the dynamic body stood on (a platform), or -1. */
+  body: number;
 }
 
 export interface MoveOptions {
   stepHeight?: number;
   /** Minimum normal z of a surface the capsule can stand on. */
   walkableZ?: number;
+  /** Move against the real shapes only, not the grown human hulls (climbing a ladder through a tower's hull). */
+  ignoreHulls?: boolean;
 }
 
 export interface MoveResult {
@@ -94,12 +100,13 @@ class Candidates {
   kind = new Uint8Array(256);
   material = new Int32Array(256);
   object = new Int32Array(256);
+  body = new Int32Array(256);
 
   clear() {
     this.n = 0;
   }
 
-  push(p: ArrayLike<number>, q: number, kind: number, material: number, object: number) {
+  push(p: ArrayLike<number>, q: number, kind: number, material: number, object: number, body = -1) {
     if (this.n === this.kind.length) this.grow();
     const i = this.n++;
     for (let k = 0; k < 9; k++) this.pos[i * 9 + k] = p[q + k];
@@ -117,6 +124,26 @@ class Candidates {
     this.kind[i] = kind;
     this.material[i] = material;
     this.object[i] = object;
+    this.body[i] = body;
+  }
+
+  /** Remove the candidates of one kind, keeping the order of the rest. */
+  drop(kind: number) {
+    let j = 0;
+    for (let i = 0; i < this.n; i++) {
+      if (this.kind[i] === kind) continue;
+      if (i !== j) {
+        this.pos.copyWithin(j * 9, i * 9, i * 9 + 9);
+        this.normal.copyWithin(j * 3, i * 3, i * 3 + 3);
+        this.box.copyWithin(j * 6, i * 6, i * 6 + 6);
+        this.kind[j] = this.kind[i];
+        this.material[j] = this.material[i];
+        this.object[j] = this.object[i];
+        this.body[j] = this.body[i];
+      }
+      j++;
+    }
+    this.n = j;
   }
 
   private grow() {
@@ -132,6 +159,7 @@ class Candidates {
     this.kind = g(this.kind, 1);
     this.material = g(this.material, 1);
     this.object = g(this.object, 1);
+    this.body = g(this.body, 1);
   }
 }
 
@@ -154,75 +182,10 @@ export class CollisionWorld {
     this.objects = options.objects;
     this.terrain = options.terrain ? new TerrainCollider(options.terrain, options.origin, options.terrainGameMaterials) : null;
 
-    // Count, then fill the triangle soup.
-    let total = 0;
-    let skipped = 0;
-    for (const o of options.objects) {
-      if (o.collision.modelType === 1) continue;
-      total += (o.collision.hit?.faceGroup.length ?? 0) + (o.collision.human?.faceGroup.length ?? 0);
-    }
-    const positions = new Float32Array(total * 9);
-    const materials = new Uint16Array(total);
-    const flags = new Uint8Array(total);
-    const objects = new Uint32Array(total);
-    let n = 0;
-    let hitTriangles = 0;
-    let hullTriangles = 0;
-    const ranges = new Uint32Array(options.objects.length * 2);
-    options.objects.forEach((o, index) => {
-      ranges[index * 2] = n;
-      ranges[index * 2 + 1] = n;
-      // Skinned models' collision is bone-relative; they are characters, not static geometry.
-      if (o.collision.modelType === 1) {
-        skipped++;
-        return;
-      }
-      const m = o.matrix;
-      const hasHull = !!o.collision.human;
-      for (const [mesh, isHull] of [[o.collision.hit, false], [o.collision.human, true]] as const) {
-        if (!mesh) continue;
-        const v = mesh.vertices;
-        for (let f = 0; f < mesh.faceGroup.length; f++) {
-          for (let k = 0; k < 3; k++) {
-            const i = mesh.faces[f * 3 + k] * 3;
-            const x = v[i], y = v[i + 1], z = v[i + 2];
-            positions[n * 9 + k * 3] = m[0] * x + m[4] * y + m[8] * z + m[12];
-            positions[n * 9 + k * 3 + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
-            positions[n * 9 + k * 3 + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
-          }
-          const group = mesh.groups[mesh.faceGroup[f]];
-          const material = group.material;
-          materials[n] = material;
-          objects[n] = index;
-          if (isHull) {
-            flags[n] = TRI_MOVE | TRI_HULL;
-            hullTriangles++;
-          } else {
-            const info = material === NO_MATERIAL ? undefined : this.materials[material];
-            let fl = 0;
-            // Linked groups are the panes filling a building's window and door openings (no material); the
-            // openings stay open to rays and sight, as the doors themselves are separate Door objects.
-            const opening = group.link >= 0 && material === NO_MATERIAL;
-            if (!info?.passThrough && !opening) fl |= TRI_RAY;
-            if (!opening && (!info || (info.transparency <= 0.5 && !info.passThrough))) fl |= TRI_SIGHT;
-            // Models without a human hull block movement with their real shape (fences, small buildings). Where a
-            // hull exists, the real shape still keeps the capsule's core out (details the coarse hull leaves out,
-            // such as furniture inside an open doorway), with a thin radius.
-            // Openings never block: a capsule only fits through door-sized ones (level12's tunnel shells close each
-            // end with an opening group, which used to wall off every tunnel joint).
-            if (material !== 0 && !opening && !info?.passThrough) fl |= hasHull ? TRI_MOVE | TRI_THIN : TRI_MOVE;
-            else if (!hasHull && material !== 0 && !opening) fl |= TRI_MOVE;
-            flags[n] = fl;
-            hitTriangles++;
-          }
-          n++;
-        }
-      }
-      ranges[index * 2 + 1] = n;
-    });
+    const { soup, hitTriangles, hullTriangles, skipped, ranges } = buildSoup(options.objects, this.materials);
     this.ranges = ranges;
-    this.flags = flags.slice();
-    this.bvh = new TriangleBvh({ positions, materials, flags, objects });
+    this.flags = soup.flags.slice();
+    this.bvh = new TriangleBvh(soup);
     this.stats = { objects: options.objects.length - skipped, hitTriangles, hullTriangles, skipped };
   }
 
@@ -239,13 +202,67 @@ export class CollisionWorld {
     for (let t = this.ranges[index * 2], end = this.ranges[index * 2 + 1]; t < end; t++) soup[t] = enabled ? this.flags[t] : 0;
   }
 
+  // ---------------------------------------------------------------------------------------------------- dynamic bodies
+
+  /**
+   * Add a moving collider (door, elevator car, vehicle, train car): the model's collision sets in model space, placed
+   * by an origin-relative column-major matrix that `DynamicBody.setMatrix` updates. Rays, sight, ground and movement
+   * see it at its current pose. Returns null for models without usable collision.
+   */
+  addBody(model: string, collision: ModelCollision, matrix: ArrayLike<number>, entityId: number | null = null): DynamicBody | null {
+    if (collision.modelType === 1 || (!collision.hit && !collision.human)) return null;
+    const { soup } = buildSoup([{ model, collision, matrix: IDENTITY }], this.materials);
+    if (!soup.flags.length) return null;
+    const body = new DynamicBody(this.nextBodyId++, model, new TriangleBvh(soup), entityId);
+    body.setMatrix(matrix);
+    this.bodies.push(body);
+    return body;
+  }
+
+  /**
+   * Drop static (non-hull) triangles lying inside the body's model-space bounds (grown by `margin`) at `matrix`, so a
+   * Door object replaces the closed door leaf some buildings carry in their own collision. Returns how many.
+   */
+  carve(body: DynamicBody, matrix: ArrayLike<number>, margin = 0.05 * METRE): number {
+    const box = new Float64Array(6);
+    const local = body.localBounds;
+    boxOf(matrix, local, box);
+    const out: number[] = [];
+    this.bvh.query(box[0] - margin, box[1] - margin, box[2] - margin, box[3] + margin, box[4] + margin, box[5] + margin, TRI_RAY | TRI_SIGHT | TRI_MOVE, out);
+    const soup = this.bvh.soup;
+    const p = soup.positions;
+    const v = [0, 0, 0];
+    let n = 0;
+    for (const tri of out) {
+      if (soup.flags[tri] & TRI_HULL) continue;
+      let inside = true;
+      for (let k = 0; k < 3 && inside; k++) {
+        toLocal(matrix, p[tri * 9 + k * 3], p[tri * 9 + k * 3 + 1], p[tri * 9 + k * 3 + 2], v);
+        for (let j = 0; j < 3; j++) if (v[j] < local[j] - margin || v[j] > local[3 + j] + margin) inside = false;
+      }
+      if (!inside) continue;
+      soup.flags[tri] = 0;
+      this.flags[tri] = 0;
+      n++;
+    }
+    return n;
+  }
+
+  removeBody(body: DynamicBody) {
+    const i = this.bodies.indexOf(body);
+    if (i >= 0) this.bodies.splice(i, 1);
+  }
+
+  readonly bodies: DynamicBody[] = [];
+  private nextBodyId = 1;
+
   materialName(id: number): string | undefined {
     return id >= 0 ? this.materials[id]?.name : undefined;
   }
 
   // ---------------------------------------------------------------------------------------------------- rays
 
-  /** Nearest static or terrain hit on the segment from → to among triangles with any of `mask`'s flags. */
+  /** Nearest static, dynamic-body or terrain hit on the segment from → to among triangles with any of `mask`'s flags. */
   raycast(from: readonly number[], to: readonly number[], mask = TRI_RAY): WorldHit | null {
     const [gx, gy, gz] = this.origin;
     const ox = from[0] - gx, oy = from[1] - gy, oz = from[2] - gz;
@@ -255,15 +272,37 @@ export class CollisionWorld {
     const ux = dx / len, uy = dy / len, uz = dz / len;
     const s = this.bvh.raycast(ox, oy, oz, ux, uy, uz, len, mask);
     const t = this.terrain?.raycast(ox, oy, oz, ux, uy, uz, s ? s.t : len) ?? null;
+    let limit = t ? t.t : s ? s.t : len;
+    let bodyHit: { body: DynamicBody; tri: number; t: number } | null = null;
+    for (const b of this.bodies) {
+      if (!b.enabled || !rayBox(ox, oy, oz, ux, uy, uz, limit, b.box)) continue;
+      toLocal(b.matrix, ox, oy, oz, lo);
+      // A ray that starts inside a collider's bounds (a guard's muzzle in a doorway beside the open door, a gunner in
+      // a vehicle) passes out of it: no shooting your own cover from the inside.
+      const lb = b.localBounds;
+      if (lo[0] > lb[0] && lo[0] < lb[3] && lo[1] > lb[1] && lo[1] < lb[4] && lo[2] > lb[2] && lo[2] < lb[5]) continue;
+      dirToLocal(b.matrix, ux, uy, uz, ld);
+      const h = b.bvh.raycast(lo[0], lo[1], lo[2], ld[0], ld[1], ld[2], limit, mask);
+      if (h) {
+        limit = h.t;
+        bodyHit = { body: b, tri: h.tri, t: h.t };
+      }
+    }
     let hit: WorldHit;
     const n = [0, 0, 0];
-    if (t) {
+    if (bodyHit) {
+      const { body, tri } = bodyHit;
+      triangleNormal(body.bvh.soup.positions, tri * 9, n);
+      dirToWorld(body.matrix, n[0], n[1], n[2], n);
+      const m = body.bvh.soup.materials[tri];
+      hit = { distance: bodyHit.t, point: [0, 0, 0], normal: [n[0], n[1], n[2]], material: m === NO_MATERIAL ? -1 : m, object: -1, body: body.id };
+    } else if (t) {
       triangleNormal(t.column.positions, t.tri * 9, n);
-      hit = { distance: t.t, point: [0, 0, 0], normal: [n[0], n[1], n[2]], material: this.terrain!.gameMaterial(t.column.materials[t.tri]), object: -1 };
+      hit = { distance: t.t, point: [0, 0, 0], normal: [n[0], n[1], n[2]], material: this.terrain!.gameMaterial(t.column.materials[t.tri]), object: -1, body: -1 };
     } else if (s) {
       triangleNormal(this.bvh.soup.positions, s.tri * 9, n);
       const m = this.bvh.soup.materials[s.tri];
-      hit = { distance: s.t, point: [0, 0, 0], normal: [n[0], n[1], n[2]], material: m === NO_MATERIAL ? -1 : m, object: this.bvh.soup.objects[s.tri] };
+      hit = { distance: s.t, point: [0, 0, 0], normal: [n[0], n[1], n[2]], material: m === NO_MATERIAL ? -1 : m, object: this.bvh.soup.objects[s.tri], body: -1 };
     } else return null;
     if (hit.normal[0] * ux + hit.normal[1] * uy + hit.normal[2] * uz > 0) hit.normal = [-hit.normal[0], -hit.normal[1], -hit.normal[2]];
     hit.point = [from[0] + ux * hit.distance, from[1] + uy * hit.distance, from[2] + uz * hit.distance];
@@ -278,12 +317,12 @@ export class CollisionWorld {
    * Highest surface a character could stand on under (x, y) at or below fromZ: static models (their movement
    * shape) and terrain. Surfaces steeper than `walkableZ` are ignored.
    */
-  ground(x: number, y: number, fromZ = 2 ** 31, walkableZ = 0.3): GroundInfo | null {
+  ground(x: number, y: number, fromZ = 2 ** 31, walkableZ = 0.3, bodies = true): GroundInfo | null {
     const [gx, gy, gz] = this.origin;
     const top = Math.min(fromZ, 2 ** 31) - gz;
     let best: GroundInfo | null = null;
     const terrain = this.terrain?.ground(x, y);
-    if (terrain && terrain.z <= fromZ + 1) best = { z: terrain.z, normal: terrain.normal, material: this.terrain!.gameMaterial(terrain.material), object: -1 };
+    if (terrain && terrain.z <= fromZ + 1) best = { z: terrain.z, normal: terrain.normal, material: this.terrain!.gameMaterial(terrain.material), object: -1, body: -1 };
     const floor = best ? best.z - gz - 1 : -(2 ** 31);
     const n = [0, 0, 0];
     const soup = this.bvh.soup;
@@ -297,7 +336,15 @@ export class CollisionWorld {
         const under = this.bvh.raycast(x - gx, y - gy, top - s.t + 1, 0, 0, -1, HULL_MATERIAL_DEPTH, TRI_RAY);
         if (under) m = soup.materials[under.tri];
       }
-      best = { z: top - s.t + gz, normal: [n[0], n[1], n[2]], material: m === NO_MATERIAL ? -1 : m, object: soup.objects[s.tri] };
+      best = { z: top - s.t + gz, normal: [n[0], n[1], n[2]], material: m === NO_MATERIAL ? -1 : m, object: soup.objects[s.tri], body: -1 };
+    }
+    // Moving platforms (elevator cars, train roofs, vehicles).
+    for (const b of bodies ? this.bodies : []) {
+      const bottom = best ? best.z - gz : floor;
+      const box = b.box;
+      if (!b.enabled || box[0] > x - gx || box[3] < x - gx || box[1] > y - gy || box[4] < y - gy || box[2] > top || box[5] < bottom) continue;
+      const h = this.bodyGround(b, x - gx, y - gy, top, top - bottom, walkableZ);
+      if (h) best = { ...h, z: h.z + gz };
     }
     return best;
   }
@@ -326,6 +373,7 @@ export class CollisionWorld {
       Math.max(px, px + dx) + margin, Math.max(py, py + dy) + margin, Math.max(pz, pz + dz) + height + margin,
     );
     const c = this.cand;
+    if (options.ignoreHulls) c.drop(KIND_HULL);
 
     const steps = Math.min(256, Math.max(1, Math.ceil(Math.max(Math.hypot(dx, dy), Math.abs(dz)) / (Math.max(hullRadius, 1) * 0.5))));
     let grounded = false;
@@ -408,6 +456,11 @@ export class CollisionWorld {
       const f = soup.flags[tri];
       c.push(soup.positions, tri * 9, f & TRI_HULL ? KIND_HULL : f & TRI_THIN ? KIND_THIN : KIND_SOLID, m === NO_MATERIAL ? -1 : m, soup.objects[tri]);
     }
+    for (const b of this.bodies) {
+      const box = b.box;
+      if (!b.enabled || box[0] > maxX || box[3] < minX || box[1] > maxY || box[4] < minY || box[2] > maxZ || box[5] < minZ) continue;
+      this.gatherBody(b, b.matrix, minX, minY, minZ, maxX, maxY, maxZ);
+    }
     const terrain = this.terrain;
     if (!terrain) return;
     terrain.forColumns(minX, minY, maxX, maxY, (col) => {
@@ -421,6 +474,142 @@ export class CollisionWorld {
         c.push(p, q, KIND_SOLID, terrain.gameMaterial(col.materials[j]), -1);
       }
     });
+  }
+
+  /** Append a body's movement triangles overlapping an origin-relative box to the candidates, in world space. */
+  private gatherBody(b: DynamicBody, m: ArrayLike<number>, minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number) {
+    // The query box in the body's frame: bounds of its eight corners.
+    const lmin = [Infinity, Infinity, Infinity];
+    const lmax = [-Infinity, -Infinity, -Infinity];
+    for (let k = 0; k < 8; k++) {
+      toLocal(m, k & 1 ? maxX : minX, k & 2 ? maxY : minY, k & 4 ? maxZ : minZ, lo);
+      for (let j = 0; j < 3; j++) {
+        if (lo[j] < lmin[j]) lmin[j] = lo[j];
+        if (lo[j] > lmax[j]) lmax[j] = lo[j];
+      }
+    }
+    const out = this.queryOut;
+    out.length = 0;
+    b.bvh.query(lmin[0], lmin[1], lmin[2], lmax[0], lmax[1], lmax[2], TRI_MOVE, out);
+    const soup = b.bvh.soup;
+    const p = soup.positions;
+    for (const tri of out) {
+      for (let k = 0; k < 3; k++) {
+        toWorld(m, p[tri * 9 + k * 3], p[tri * 9 + k * 3 + 1], p[tri * 9 + k * 3 + 2], lo);
+        tri9[k * 3] = lo[0];
+        tri9[k * 3 + 1] = lo[1];
+        tri9[k * 3 + 2] = lo[2];
+      }
+      const mat = soup.materials[tri];
+      const f = soup.flags[tri];
+      this.cand.push(tri9, 0, f & TRI_HULL ? KIND_HULL : f & TRI_THIN ? KIND_THIN : KIND_SOLID, mat === NO_MATERIAL ? -1 : mat, -1, b.id);
+    }
+  }
+
+  /** Highest walkable surface of a body under origin-relative (x, y), searching down from `top` by `depth`. */
+  private bodyGround(b: DynamicBody, x: number, y: number, top: number, depth: number, walkableZ: number): GroundInfo | null {
+    const m = b.matrix;
+    toLocal(m, x, y, top, lo);
+    dirToLocal(m, 0, 0, -1, ld);
+    const soup = b.bvh.soup;
+    const n = [0, 0, 0];
+    const worldNz = (tri: number) => {
+      triangleNormal(soup.positions, tri * 9, n);
+      return m[2] * n[0] + m[6] * n[1] + m[10] * n[2];
+    };
+    const h = b.bvh.raycast(lo[0], lo[1], lo[2], ld[0], ld[1], ld[2], depth, TRI_MOVE, (tri) => Math.abs(worldNz(tri)) >= walkableZ);
+    if (!h) return null;
+    triangleNormal(soup.positions, h.tri * 9, n);
+    dirToWorld(m, n[0], n[1], n[2], n);
+    if (n[2] < 0) n[0] = -n[0], n[1] = -n[1], n[2] = -n[2];
+    let mat = soup.materials[h.tri];
+    if (soup.flags[h.tri] & TRI_HULL) {
+      const under = b.bvh.raycast(lo[0] + ld[0] * (h.t - 1), lo[1] + ld[1] * (h.t - 1), lo[2] + ld[2] * (h.t - 1), ld[0], ld[1], ld[2], HULL_MATERIAL_DEPTH, TRI_RAY);
+      if (under) mat = soup.materials[under.tri];
+    }
+    return { z: top - h.t, normal: [n[0], n[1], n[2]], material: mat === NO_MATERIAL ? -1 : mat, object: -1, body: b.id };
+  }
+
+  /**
+   * Does a character standing at `feet` (absolute) rest on the body when the body is at `matrix`? A short probe down
+   * from just above the feet at the centre and four points around it, for walkable surfaces that stand above the
+   * static ground there (a door's hull reaching down to the floor it stands on is not a platform).
+   */
+  supports(b: DynamicBody, matrix: ArrayLike<number>, feet: readonly number[], radius: number): boolean {
+    let floor: number | null = null;
+    const [gx, gy, gz] = this.origin;
+    const above = 0.35 * METRE;
+    const below = 0.35 * METRE;
+    const spread = radius * 0.4;
+    dirToLocal(matrix, 0, 0, -1, ld);
+    const soup = b.bvh.soup;
+    const n = [0, 0, 0];
+    const worldNz = (tri: number) => {
+      triangleNormal(soup.positions, tri * 9, n);
+      return matrix[2] * n[0] + matrix[6] * n[1] + matrix[10] * n[2];
+    };
+    for (let k = 0; k < 5; k++) {
+      const x = feet[0] - gx + (k === 1 ? spread : k === 2 ? -spread : 0);
+      const y = feet[1] - gy + (k === 3 ? spread : k === 4 ? -spread : 0);
+      toLocal(matrix, x, y, feet[2] - gz + above, lo);
+      const h = b.bvh.raycast(lo[0], lo[1], lo[2], ld[0], ld[1], ld[2], above + below, TRI_MOVE, (tri) => Math.abs(worldNz(tri)) >= DEFAULT_WALKABLE_Z);
+      if (!h) continue;
+      if (floor === null) {
+        const under = this.ground(feet[0], feet[1], feet[2] + 0.05 * METRE, DEFAULT_WALKABLE_Z, false);
+        floor = under ? under.z - gz + 0.05 * METRE : -Infinity;
+      }
+      if (feet[2] - gz + above - h.t > floor) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Push a character capsule (feet absolute) horizontally out of the body's movement shape above its step height,
+   * away from the surfaces it overlaps (along `motion`, the body's own horizontal motion there, when it sits right on
+   * one). Returns the horizontal displacement, or null when there is no overlap. Used when doors swing into characters
+   * and vehicles drive into them.
+   */
+  pushOut(b: DynamicBody, feet: readonly number[], radius: number, height: number, motion: readonly number[]): [number, number] | null {
+    const [gx, gy, gz] = this.origin;
+    let px = feet[0] - gx, py = feet[1] - gy;
+    const pz = feet[2] - gz;
+    const box = b.box;
+    const margin = radius + 0.5 * METRE;
+    if (box[0] > px + margin || box[3] < px - margin || box[1] > py + margin || box[4] < py - margin || box[2] > pz + height || box[5] < pz) return null;
+    const c = this.cand;
+    c.clear();
+    this.gatherBody(b, b.matrix, px - margin, py - margin, pz, px + margin, py + margin, pz + height);
+    const step = Math.min(DEFAULT_STEP_HEIGHT, height * 0.5);
+    const hullRadius = Math.max(MIN_HULL_RADIUS, radius - HULL_GROWTH);
+    const thinRadius = Math.min(radius, THIN_RADIUS);
+    const ml = Math.hypot(motion[0], motion[1]);
+    let pushed = false;
+    for (let iter = 0; iter < 6; iter++) {
+      let moved = false;
+      for (let i = 0; i < c.n; i++) {
+        if (Math.abs(c.normal[i * 3 + 2]) >= DEFAULT_WALKABLE_Z) continue;
+        const r = c.kind[i] === KIND_HULL ? hullRadius : c.kind[i] === KIND_THIN ? thinRadius : radius;
+        const z0 = pz + step + r;
+        const z1 = Math.max(z0, pz + height - r);
+        const d = segmentTriangle(px, py, z0, z1, c.pos, i * 9, closest);
+        if (d >= r) continue;
+        let hx = px - closest[0];
+        let hy = py - closest[1];
+        const hl = Math.hypot(hx, hy);
+        if (hl > 1e-3) {
+          hx /= hl;
+          hy /= hl;
+        } else if (ml > 0) {
+          hx = motion[0] / ml;
+          hy = motion[1] / ml;
+        } else continue;
+        px += hx * (r - d + 0.5);
+        py += hy * (r - d + 0.5);
+        moved = pushed = true;
+      }
+      if (!moved) break;
+    }
+    return pushed ? [px + gx - feet[0], py + gy - feet[1]] : null;
   }
 
   /** Highest walkable candidate surface at or below `top` under the centre and four points `spread` around it. */
@@ -440,10 +629,10 @@ export class CollisionWorld {
         if (Math.abs(nz) < walkableZ) continue;
         const z = planeZ(c.pos, i * 9, c.normal, i * 3, qx, qy);
         if (z === null || z > top) continue;
-        if (c.kind[i] !== KIND_HULL && (!real || z > real.z)) real = { z, normal: [0, 0, 1], material: c.material[i], object: c.object[i] };
+        if (c.kind[i] !== KIND_HULL && (!real || z > real.z)) real = { z, normal: [0, 0, 1], material: c.material[i], object: c.object[i], body: c.body[i] };
         if (best && z <= best.z) continue;
         const s = nz < 0 ? -1 : 1;
-        best = { z, normal: [c.normal[i * 3] * s, c.normal[i * 3 + 1] * s, nz * s], material: c.material[i], object: c.object[i] };
+        best = { z, normal: [c.normal[i * 3] * s, c.normal[i * 3 + 1] * s, nz * s], material: c.material[i], object: c.object[i], body: c.body[i] };
         bestKind = c.kind[i];
       }
     }
@@ -468,6 +657,220 @@ export class CollisionWorld {
 }
 
 const closest = [0, 0, 0];
+
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/**
+ * One triangle soup from models' collision sets, transformed by their matrices, with per-triangle query flags (see
+ * docs/formats/collision.md, "How open-igi uses it").
+ */
+function buildSoup(objects: StaticObjectInput[], gameMaterials: GameMaterial[]) {
+  let total = 0;
+  let skipped = 0;
+  for (const o of objects) {
+    if (o.collision.modelType === 1) continue;
+    total += (o.collision.hit?.faceGroup.length ?? 0) + (o.collision.human?.faceGroup.length ?? 0);
+  }
+  const positions = new Float32Array(total * 9);
+  const materials = new Uint16Array(total);
+  const flags = new Uint8Array(total);
+  const owners = new Uint32Array(total);
+  const ranges = new Uint32Array(objects.length * 2);
+  let n = 0;
+  let hitTriangles = 0;
+  let hullTriangles = 0;
+  objects.forEach((o, index) => {
+    ranges[index * 2] = n;
+    ranges[index * 2 + 1] = n;
+    // Skinned models' collision is bone-relative; they are characters, not static geometry.
+    if (o.collision.modelType === 1) {
+      skipped++;
+      return;
+    }
+    const m = o.matrix;
+    const hasHull = !!o.collision.human;
+    for (const [mesh, isHull] of [[o.collision.hit, false], [o.collision.human, true]] as const) {
+      if (!mesh) continue;
+      const v = mesh.vertices;
+      for (let f = 0; f < mesh.faceGroup.length; f++) {
+        for (let k = 0; k < 3; k++) {
+          const i = mesh.faces[f * 3 + k] * 3;
+          const x = v[i], y = v[i + 1], z = v[i + 2];
+          positions[n * 9 + k * 3] = m[0] * x + m[4] * y + m[8] * z + m[12];
+          positions[n * 9 + k * 3 + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+          positions[n * 9 + k * 3 + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+        }
+        const group = mesh.groups[mesh.faceGroup[f]];
+        const material = group.material;
+        materials[n] = material;
+        owners[n] = index;
+        if (isHull) {
+          flags[n] = TRI_MOVE | TRI_HULL;
+          hullTriangles++;
+        } else {
+          const info = material === NO_MATERIAL ? undefined : gameMaterials[material];
+          let fl = 0;
+          // Linked groups are the panes filling a building's window and door openings (no material); the
+          // openings stay open to rays and sight, as the doors themselves are separate Door objects.
+          const opening = group.link >= 0 && material === NO_MATERIAL;
+          if (!info?.passThrough && !opening) fl |= TRI_RAY;
+          if (!opening && (!info || (info.transparency <= 0.5 && !info.passThrough))) fl |= TRI_SIGHT;
+          // Models without a human hull block movement with their real shape (fences, small buildings). Where a
+          // hull exists, the real shape still keeps the capsule's core out (details the coarse hull leaves out,
+          // such as furniture inside an open doorway), with a thin radius.
+          if (material !== 0 && !opening && !info?.passThrough) fl |= hasHull ? TRI_MOVE | TRI_THIN : TRI_MOVE;
+          // Openings never block: a capsule only fits through door-sized ones (level12's tunnel shells close each
+          // end with an opening group, which used to wall off every tunnel joint).
+          else if (!hasHull && material !== 0 && !opening) fl |= TRI_MOVE;
+          flags[n] = fl;
+          hitTriangles++;
+        }
+        n++;
+      }
+    }
+    ranges[index * 2 + 1] = n;
+  });
+  return { soup: { positions, materials, flags, objects: owners }, hitTriangles, hullTriangles, skipped, ranges };
+}
+
+/**
+ * A moving collider: its triangles stay in model space in their own BVH; queries transform into the body's frame.
+ * Matrices are rigid (rotation + translation, no scale), column-major, origin-relative like StaticObjectInput.matrix.
+ */
+export class DynamicBody {
+  readonly id: number;
+  readonly model: string;
+  readonly bvh: TriangleBvh;
+  /** Entity whose hits this body reports (doors, vehicles), or null. */
+  entityId: number | null;
+  /** Disabled bodies take part in no query (a hidden or destroyed object). */
+  enabled = true;
+  /** Model → origin-relative world. */
+  readonly matrix = new Float64Array(16);
+  /** The pose at the last carry step (physics moves riders by matrix * inverse(carried)). */
+  readonly carried = new Float64Array(16);
+  /** World-space bounds (origin-relative): minX, minY, minZ, maxX, maxY, maxZ. */
+  readonly box = new Float64Array(6);
+  /** World-space bounds at the carry reference pose. */
+  readonly oldBox = new Float64Array(6);
+  /** Model-space bounds of all triangles: minX, minY, minZ, maxX, maxY, maxZ. */
+  readonly localBounds: number[];
+
+  constructor(id: number, model: string, bvh: TriangleBvh, entityId: number | null) {
+    this.id = id;
+    this.model = model;
+    this.bvh = bvh;
+    this.entityId = entityId;
+    const p = bvh.soup.positions;
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < p.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        if (p[i + k] < lo[k]) lo[k] = p[i + k];
+        if (p[i + k] > hi[k]) hi[k] = p[i + k];
+      }
+    }
+    this.localBounds = [...lo, ...hi];
+    this.carried.set(IDENTITY);
+  }
+
+  /** Place the body (column-major, origin-relative). The first call also sets the carry reference. */
+  setMatrix(m: ArrayLike<number>) {
+    const first = this.matrix[15] === 0;
+    for (let i = 0; i < 16; i++) this.matrix[i] = m[i];
+    boxOf(this.matrix, this.localBounds, this.box);
+    if (first) this.settle();
+  }
+
+  /** Make the current pose the carry reference (after carrying riders, or when re-enabled). */
+  settle() {
+    this.carried.set(this.matrix);
+    this.oldBox.set(this.box);
+  }
+
+  /** Has the body moved since the last carry step? */
+  get moved(): boolean {
+    for (let i = 0; i < 16; i++) if (this.matrix[i] !== this.carried[i]) return true;
+    return false;
+  }
+}
+
+/** World bounds of a model-space box under a rigid matrix. */
+function boxOf(m: ArrayLike<number>, local: number[], out: Float64Array) {
+  for (let k = 0; k < 3; k++) {
+    let lo = m[12 + k];
+    let hi = m[12 + k];
+    for (let j = 0; j < 3; j++) {
+      const a = m[j * 4 + k] * local[j];
+      const b = m[j * 4 + k] * local[3 + j];
+      lo += Math.min(a, b);
+      hi += Math.max(a, b);
+    }
+    out[k] = lo;
+    out[3 + k] = hi;
+  }
+}
+
+/** World point → model space under a rigid matrix (transpose of the rotation). */
+export function toLocal(m: ArrayLike<number>, x: number, y: number, z: number, out: number[]): number[] {
+  const dx = x - m[12], dy = y - m[13], dz = z - m[14];
+  out[0] = m[0] * dx + m[1] * dy + m[2] * dz;
+  out[1] = m[4] * dx + m[5] * dy + m[6] * dz;
+  out[2] = m[8] * dx + m[9] * dy + m[10] * dz;
+  return out;
+}
+
+/** World direction → model space. */
+export function dirToLocal(m: ArrayLike<number>, x: number, y: number, z: number, out: number[]): number[] {
+  out[0] = m[0] * x + m[1] * y + m[2] * z;
+  out[1] = m[4] * x + m[5] * y + m[6] * z;
+  out[2] = m[8] * x + m[9] * y + m[10] * z;
+  return out;
+}
+
+/** Model direction → world. */
+export function dirToWorld(m: ArrayLike<number>, x: number, y: number, z: number, out: number[]): number[] {
+  const a = m[0] * x + m[4] * y + m[8] * z;
+  const b = m[1] * x + m[5] * y + m[9] * z;
+  const c = m[2] * x + m[6] * y + m[10] * z;
+  out[0] = a;
+  out[1] = b;
+  out[2] = c;
+  return out;
+}
+
+/** Does the ray o + t*u, 0 <= t <= tMax, touch the box (minX, minY, minZ, maxX, maxY, maxZ)? */
+function rayBox(ox: number, oy: number, oz: number, ux: number, uy: number, uz: number, tMax: number, b: ArrayLike<number>): boolean {
+  let t0 = 0;
+  let t1 = tMax;
+  const o = [ox, oy, oz];
+  const u = [ux, uy, uz];
+  for (let k = 0; k < 3; k++) {
+    if (Math.abs(u[k]) < 1e-12) {
+      if (o[k] < b[k] || o[k] > b[3 + k]) return false;
+      continue;
+    }
+    let a = (b[k] - o[k]) / u[k];
+    let c = (b[3 + k] - o[k]) / u[k];
+    if (a > c) [a, c] = [c, a];
+    if (a > t0) t0 = a;
+    if (c < t1) t1 = c;
+    if (t0 > t1) return false;
+  }
+  return true;
+}
+
+const lo = [0, 0, 0];
+const ld = [0, 0, 0];
+const tri9 = new Float64Array(9);
+
+/** Model point → world. */
+export function toWorld(m: ArrayLike<number>, x: number, y: number, z: number, out: number[]): number[] {
+  out[0] = m[0] * x + m[4] * y + m[8] * z + m[12];
+  out[1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+  out[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+  return out;
+}
 
 /** z of the triangle's plane at (x, y) when (x, y) lies inside its x/y projection, else null. */
 function planeZ(p: Float64Array, q: number, n: Float64Array, nq: number, x: number, y: number): number | null {

@@ -25,6 +25,7 @@ export function worldSystem(): GameSystem {
   let sky: SkyRenderer | null = null;
   let statics: StaticRenderer | null = null;
   let splines: Splines | null = null;
+  let collidersAttached = false;
   const gated: { mesh: THREE.Mesh; gates: number[] }[] = [];
   const eye = new THREE.Vector3();
 
@@ -120,6 +121,11 @@ export function worldSystem(): GameSystem {
     },
 
     update(dt, game) {
+      // Train cars collide once the physics system (initialised after this one) is up.
+      if (splines && game.services.physics && !collidersAttached) {
+        splines.attachColliders(game.services.physics);
+        collidersAttached = true;
+      }
       splines?.update(dt);
       for (const g of gated) g.mesh.visible = gatesOpen(game, g.gates);
     },

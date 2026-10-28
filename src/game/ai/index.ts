@@ -199,18 +199,37 @@ class AiSystem implements AiService, AiWorld {
       this.commonScripts.set(common, null);
       this.commonScripts.set(common, await script(`common/ai/${common}.qvm`));
     }
-    if (!this.graphs.has(spec.graphId)) {
-      this.graphs.set(spec.graphId, null);
-      const path = `${dir}/graphs/graph${spec.graphId}.dat`;
-      const origin = this.data.graphs.get(spec.graphId);
-      if (origin && vfs.has(path)) {
-        try {
-          this.graphs.set(spec.graphId, new NavGraph(parseAiGraph(await vfs.read(path)), origin));
-        } catch (err) {
-          console.warn(`ai: ${path}: ${(err as Error).message}`);
-        }
+    await this.loadGraph(spec.graphId);
+  }
+
+  /** Load an AIGraph task's graph (graphs/graph<id>.dat) once. */
+  private graphsLoading = new Set<number>();
+
+  private async loadGraph(id: number) {
+    if (this.graphs.has(id)) return;
+    this.graphs.set(id, null);
+    this.graphsLoading.add(id);
+    const vfs = this.game.vfs;
+    const path = `${this.game.level.dir}/graphs/graph${id}.dat`;
+    const origin = this.data.graphs.get(id);
+    if (origin && vfs.has(path)) {
+      try {
+        this.graphs.set(id, new NavGraph(parseAiGraph(await vfs.read(path)), origin));
+      } catch (err) {
+        console.warn(`ai: ${path}: ${(err as Error).message}`);
       }
     }
+    this.graphsLoading.delete(id);
+  }
+
+  graphRoute(graphId: number, from: Vec3, toNode: number): Vec3[] | null | undefined {
+    if (!this.graphs.has(graphId)) void this.loadGraph(graphId);
+    if (this.graphsLoading.has(graphId)) return undefined;
+    const graph = this.graphs.get(graphId);
+    const to = graph?.node(toNode);
+    const start = graph?.nearest(from);
+    if (!graph || !to || !start) return null;
+    return graph.path(start, to)?.map((n) => n.position) ?? [to.position];
   }
 
   /** Weapon facts for soldiers: the weapons service's specs when it has them, else weapons/<NAME>/weapon.qvm. */

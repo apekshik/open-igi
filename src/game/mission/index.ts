@@ -41,6 +41,13 @@ export function missionSystem(): GameSystem {
           entities: () => game.entities.all(),
           byTask: (id) => game.entities.byTask(id),
           lineOfSight: (a, b) => game.services.physics?.lineOfSight(a, b) ?? true,
+          ground: (x, y, z, ignoreTaskId) => objects?.ground(x, y, z, ignoreTaskId) ?? null,
+          train: (id) => game.services.world?.train(id),
+          modelExtent: (model) => objects?.modelExtent(model) ?? null,
+          route: (graph, from, node) => {
+            const ai = game.services.ai;
+            return ai?.graphRoute ? ai.graphRoute(graph, from, node) : null;
+          },
           aiDetects: (taskId) => {
             const c = ai()?.characters().find((ch) => ch.taskId === taskId);
             return !!c && c.alive && (c.state === "alert" || c.state === "combat");
@@ -209,7 +216,7 @@ export function missionSystem(): GameSystem {
 
       if (deathTimer >= 0 && (deathTimer -= dt) <= 0 && !logic.ended) logic.end(false, "killed");
 
-      objects.update();
+      objects.update(dt);
     },
 
     // After the player system has placed its camera, so a running cutscene owns the view.
