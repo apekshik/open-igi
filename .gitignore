@@ -12,6 +12,7 @@ game-data/
 *.qvm
 *.mef
 *.tex
+*.iff
 *.spr
 *.exe
 *.dll

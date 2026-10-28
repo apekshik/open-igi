@@ -16,9 +16,9 @@ Reference install: the English PC release (`IGI.exe`, 1,384,448 bytes), 1,940 fi
 | .tex | 26 loose + ~6,900 in archives | 7.2 | `LOOP` | v11 confirmed | `src/formats/tex.ts` |
 | .ctr / .cmd / .hmp | 14 / 14 / 6 | ~13 | none | terrain geometry confirmed | `src/formats/terrain.ts` |
 | .lmp / .bit | 14 / 14 | ~8 | none | layout known, not yet used | |
-| .iff | 6 | 5.2 | `FORM` / `BOBJ` | unknown (animations) | |
+| .iff | 6 | 5.2 | `FORM` / `BOBJ` | skeletons confirmed, animation keys partial | `src/formats/anim.ts` |
 | .qvm | 997 | 3.7 | `LOOP` (v8) | declarative subset confirmed (all objects.qvm) | `src/formats/qvm.ts` |
-| .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry confirmed | `src/formats/mef.ts` |
+| .mef | 6,794 in archives | | `ILFF` / `OCEM` | render geometry and type 1 skin confirmed | `src/formats/mef.ts` |
 | .olm | ~25,000 in archives | | none | unknown (per-object lightmaps) | |
 | .mtp | 17 | 0.4 | `FORM` / `MTP ` | model→texture mapping confirmed | `src/formats/mtp.ts` |
 | .fnt | 2 + in archives | | `ILFF` / `FONT` | unknown | |
@@ -87,11 +87,12 @@ disk (`HSEM` = `MESH`). Chunks in file order:
 | `CMSH`, `CVTX`, `CFCE`, `CMAT`, `CSPH` | collision mesh, vertices, faces, materials, spheres (two sets) |
 
 **Model type** (`MESH` @32): `3` static lightmapped geometry (5,616 models), `1` skinned characters (~550),
-`0` rigid movable objects (~630). Type 1 vertices are in bone space, so characters need the skeleton to look right.
+`0` rigid movable objects (~630). Type 1 vertices are in bone space, so characters need the skeleton to look right
+(see "Characters" below).
 
 **VRTX**: `vertexCount` records of 40 bytes (types 1, 3) or 32 bytes (type 0):
-`vec3 position, vec3 normal, vec2 uv` then, for 40-byte vertices, `vec2 lightmapUV` (type 3) or bone data (type 1).
-IGI is Z-up. UV v=0 is the top row of the texture.
+`vec3 position, vec3 normal, vec2 uv` then, for 40-byte vertices, `vec2 lightmapUV` (type 3) or skin data (type 1:
+`f32 weight, u16 index, u8 bone, u8 0`). IGI is Z-up. UV v=0 is the top row of the texture.
 
 **REND**: back-to-back batches, each a header followed by `indexCount` u16 triangle-list indices relative to
 `vertexStart`, with no padding.
@@ -105,6 +106,89 @@ types 0, 1 (28 bytes): vec3 centre, u16 indexCount, u16 ?, u16 material, u16 ver
 `REND` consumed exactly.
 
 Model names are `GGG_VV_L`: `L` is the LOD level (1 = most detailed, up to 5).
+
+## Characters: type 1 skin + `.iff` skeletons (bind pose confirmed, animation partial)
+
+Readers: `src/formats/mef.ts` (`skin`, `skinMef`, `skinFitError`) and `src/formats/anim.ts` (`parseAnimFile`,
+`poseBones`). Chunk sizes and the BOSH/PLST/TLST/BALH meanings come from flawme/igi-reverse-engineering; the skin
+layout, the bind-pose rule and the key layouts are our own reading (see THIRD_PARTY.md).
+
+### Skin (in the `.mef`)
+
+For type 1, `RD3D` is 56 bytes: `u32 4, triangleCount, batchCount, extraCount, renderCount, vertexCount, 0...`.
+`VRTX` holds `renderCount` render vertices followed by `extraCount` extra influence records, all 40 bytes:
+
+```
+vec3 position, vec3 normal   in the bind frame of `bone`
+vec2 uv
+f32  weight
+u16  index                   render vertex: its index within its REND batch (unused)
+                             extra record:  the model-wide render vertex it adds to
+u8   bone, u8 0
+```
+
+Each record carries one bone. A vertex weighted to several bones has its own record plus one extra record per
+additional bone (extras come in passes: all second influences, then third, then fourth). REND only references render
+vertices. Posed position = sum over a vertex's records of `weight * (boneRotation * position + boneOrigin)`; normals
+likewise without the translation.
+
+Checks, over all 537 type 1 models in every archive: RD3D counts add up, every extra targets a render vertex, every
+batch index is below `renderCount`, and the weights of each render vertex sum to 1 (0 exceptions). `ATTA` and `MVTX`
+play no part in skinning: `ATTA` is empty in every type 1 model and `MVTX` is empty in 523 of 537 (one 16-byte record in
+the rest).
+
+### `.iff` (common/anims/NNN.iff)
+
+EA IFF 85: big-endian chunk sizes, little-endian payloads, chunks padded to even length. The `FORM` sizes do not
+nest (BOBJ's size covers only the skeleton, and the last BOAN runs past the end of BOAL), so the reader walks the
+file as a flat stream of chunks and treats each `BOAH` as the start of an animation.
+
+```
+FORM BOBJ
+  FORM BOBH
+    BOSH  u32 hierarchy, u32 boneCount         hierarchy = the file number (000.iff → 0)
+    PLST  i32 parent[boneCount]                -1 for the root; parents always precede children
+    TLST  vec3 offset[boneCount]               bone origin relative to its parent, in the parent's frame
+  FORM BOAL
+    BALH  u32 animationCount, u32 ?            animationCount matches the BOAN count in all 6 files
+    FORM BOAN  (per animation)
+      BOAH  f32 duration, u32 flags, u32 id    flags bit 31 set on the walk/run cycles (looping?); id = animation number
+      BOTH  u32 n
+      BOTD  n x { vec3 rootPosition, f32 time, vec3 ?, vec3 ? }       root track (the trailing vec3s look like tangents)
+      BORH  u32 n                                                      } once per bone, in bone order
+      BORD  n x { quat (x, y, z, w), f32 time, quat ?, quat ? }        } rotation relative to the parent
+      BOEH  u32 n;  BOED  event data (not decoded)
+```
+
+| file | bones | animations | used by |
+|---|---:|---:|---|
+| 000.iff | 33 | 122 | Jones (`000_*`) |
+| 001.iff, 002.iff, 003.iff | 33 | 95, 18, 47 | soldiers; the three share one skeleton |
+| 005.iff | 56 | 78 | first-person arms (`005_01_1`), with finger bones |
+| 006.iff | 33 | 16 | Anya and the heavier build (`012_*`, `015_*`) |
+
+Bone order for the 33-bone rigs: 0 root/pelvis, 1-3 spine, 4-7 neck and head, 8-13 left arm to fingers, 14-19 right
+arm, 20-22 a chain in front of the chest (likely the weapon), 23-27 left leg to toe, 28-32 right leg.
+X is the character's right, Y forward, Z up. The root sits about 4,000 units (1 m) above the feet.
+
+**Bind pose (confirmed).** Rest rotations are identity: a bone's model-space origin is the sum of TLST offsets down
+the hierarchy, and a record's bind position is `position + origin(bone)`. Proof: every extra record must land on the
+same point as the render vertex it adds to. With the right skeleton the largest mismatch is under 1 unit for most
+models and at most ~60 units (1.5 cm) for the rest; wrong skeletons give hundreds. 006_01 and 008_01 fit best at 129
+and 242 units but still look right; 005_01_1 (arms) fits 005.iff at 731, so its bind frame is less certain.
+
+**Which skeleton.** In game the placement picks it: `HumanSoldier(..., Model, Team, Bone Heirachy, Stand Animation,
+...)` in objects.qvm, with Bone Heirachy 0 for Jones, 1 for soldiers and 6 for Anya, which matches the best-fitting
+skeleton. A model can be driven by another skeleton (Jones's mesh appears with hierarchy 1), since vertices are
+bone-relative. The model viewer has no placement, so it uses the best-fitting skeleton.
+
+**Animation (partial).** Local bone transform = translate(TLST offset, plus the BOTD root position for bone 0) ·
+rotate(BORD quaternion); model = parent · local. Sampling slerps between bracketing rotation keys and lerps the root
+position, with time in what looks like milliseconds. Animation 0 of 000.iff is a relaxed standing pose, and the
+walk/run cycles of 001.iff play convincingly. Not decoded: the second and third quaternions in BORD (equal to the
+first in single-key tracks; the game's sampler interpolates with SLERP and precomputes per-key angles, so they may be
+spline controls), the BOTD tangents, BOAH flags beyond bit 31, BALH[1], the BOED events, and how "Stand Animation"
+ids map to BOAH ids.
 
 ## .mtp material table (model→texture confirmed)
 
