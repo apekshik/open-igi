@@ -25,6 +25,8 @@ const KIND: [new (...a: never[]) => ObjectTask, string][] = [
 const METRE = 4096;
 /** How close (feet to door centre, horizontally) a walking soldier opens a door. */
 const DOOR_REACH = 1.4 * METRE;
+/** Characters this close to a closing door's centre are tested against its leaf. */
+const DOOR_BLOCK_RANGE = 4 * METRE;
 
 /** Attached parts that spin: helicopter rotor hubs and tail rotors (rad/s about their own axis). */
 const SPINNING: Record<string, { axis: "x" | "y" | "z"; speed: number }> = {
@@ -128,6 +130,22 @@ export class MissionObjects {
         const dy = c[1] - e.position[1];
         if (c[2] < e.position[2] || c[2] > e.position[2] + 2.5 * METRE || Math.hypot(dx, dy) > DOOR_REACH || dx * mx + dy * my <= 0) continue;
         t.use();
+      }
+    }
+  }
+
+  /**
+   * A door closing onto someone standing in the doorway opens again instead: pushed by the leaf into the frame, the
+   * character ended up inside the door's hull and could never walk out (Jones pressing F to close a door he stood in).
+   */
+  private reopenIfBlocked(t: DoorTask, collider: DynamicCollider) {
+    const c = t.centerPosition();
+    for (const e of this.game.entities.all()) {
+      if (!e.alive || e.radius <= 0 || (e.kind !== "player" && e.kind !== "soldier")) continue;
+      if (Math.hypot(e.position[0] - c[0], e.position[1] - c[1]) > DOOR_BLOCK_RANGE) continue;
+      if (collider.overlaps(e.position, e.radius, e.height)) {
+        t.startMove(1);
+        return;
       }
     }
   }
@@ -245,6 +263,7 @@ export class MissionObjects {
       v.group.updateMatrix();
       v.collider.setMatrix(v.group.matrix.elements);
       v.collider.enabled = v.group.visible;
+      if (t instanceof DoorTask && t.moving < 0 && !t.scriptedClose) this.reopenIfBlocked(t, v.collider);
     }
     v.entity.position = pos;
     v.entity.alive = !t.exploded && t.active && !!model;

@@ -223,6 +223,8 @@ export class Soldier implements AiCharacter {
   /** Falling speed (units/s) and seconds without headway, for physics.move. */
   private fall = 0;
   private stuck = 0;
+  /** Distance to the current route point when it was last checked, for headway over a longer window. */
+  private headway: { route: object | null; i: number; d: number; t: number } = { route: null, i: -1, d: 0, t: 0 };
   private baseClip: number = CLIP.idle;
   private lastHeard = -Infinity;
   /** A clip that plays to its end before the base clip resumes (stance changes, rolls, hit reactions). */
@@ -782,6 +784,15 @@ export class Soldier implements AiCharacter {
     }
     const progress = Math.hypot(this.position[0] - before[0], this.position[1] - before[1]);
     this.stuck = step > 0 && progress < step * 0.2 ? this.stuck + dt : 0;
+    // A character pinned in a corner can jitter (slide along one wall, get pushed back by another) and so never look
+    // stuck from frame to frame: no headway towards the point over two seconds also moves on.
+    const left = Math.hypot(target[0] - this.position[0], target[1] - this.position[1]);
+    const h = this.headway;
+    if (h.route !== r || h.i !== r.i || h.t >= 2) {
+      const blocked = h.route === r && h.i === r.i && h.d - left < 0.5 * METRE;
+      this.headway = { route: r, i: r.i, d: left, t: 0 };
+      if (blocked) this.stuck = 2;
+    } else h.t += dt;
     if (d - progress < 0.25 * METRE || this.stuck > 1) {
       this.stuck = 0;
       r.i++;
