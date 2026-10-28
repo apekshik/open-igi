@@ -37,3 +37,8 @@ npm run chunks -- "C:/path/to/igi/missions/location0/level1/terrain/terrain.res"
 ```
 
 Both write to stdout only. `out/` is gitignored because dumps can quote game data.
+
+## License
+
+The open-igi source code is licensed under the [GNU GPL v3.0 or later](LICENSE). This covers only the code in this
+repository. It grants no rights to Project I.G.I. or its data.
