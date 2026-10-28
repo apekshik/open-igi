@@ -58,6 +58,8 @@ export class Input {
   bindings: Record<Action, string[]> = structuredClone(DEFAULT_BINDINGS);
   /** Mouse sensitivity in radians per pixel. */
   sensitivity = 0.0022;
+  /** Invert vertical mouse look (options menu). */
+  invertY = false;
   private down = new Set<string>();
   private pressed = new Set<string>();
   private mouse = { dx: 0, dy: 0 };
@@ -121,7 +123,7 @@ export class Input {
 
   /** Mouse movement since the last frame, in radians (x: yaw, y: pitch). */
   look(): { yaw: number; pitch: number } {
-    return { yaw: -this.mouse.dx * this.sensitivity, pitch: -this.mouse.dy * this.sensitivity };
+    return { yaw: -this.mouse.dx * this.sensitivity, pitch: (this.invertY ? 1 : -1) * this.mouse.dy * this.sensitivity };
   }
 
   /** Called by the game at the end of each frame. */

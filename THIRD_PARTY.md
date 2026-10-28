@@ -80,3 +80,9 @@ Read for research only; no code from it is used. Its exe analysis (`docs/gamepla
 `DefineHumanPlayerGeneral` arguments, the movement state/clip table, root-motion speeds, jump and fall-damage rules,
 lean timing, footstep-noise ranges and eye offsets that `src/game/player/` reimplements in our own terms. See
 `docs/formats/player.md`.
+
+### Fonts and menus (flawme/igi-reverse-engineering)
+
+The same project's menu notes (`reverse/docs/10-menus`: the `FONT` chunk order, `TRAN` as a Latin-1 → glyph table,
+the 40-byte `ANMF` glyph record with its UV, width, height and advance offsets, and `FNTH` fields) are the basis of
+`src/formats/font.ts`; see `docs/formats/ui.md`.
