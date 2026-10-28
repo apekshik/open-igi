@@ -104,7 +104,7 @@ export class FrontEnd {
     const items: [string, () => void][] = [
       [this.t("Single Player"), () => this.missionSelect()],
       [this.t("Configuration"), () => this.configuration(false, () => this.mainMenu())],
-      [this.t("Quit"), () => this.confirm(false, () => (location.search = "?view=level"))],
+      [this.t("Quit"), () => this.confirm(false, () => (location.search = "?view=landing"))],
     ];
     const widgets: Widget[] = [new Label({ x: p.x + 14, y: p.y + 6, w: 300, h: 24 }, this.t("Main Menu"), "font3")];
     items.forEach(([text, run], i) => widgets.push(new Button({ x: p.x + 14, y: p.y + 40 + i * 28, w: 300, h: 24 }, text, run)));
@@ -116,7 +116,7 @@ export class FrontEnd {
       background: this.sprite("mainmenu"),
       panel: p,
       widgets,
-      onEscape: () => this.confirm(false, () => (location.search = "?view=level")),
+      onEscape: () => this.confirm(false, () => (location.search = "?view=landing")),
       decorate: (ctx) => {
         const logo = this.sprite("logo");
         if (logo) ctx.drawImage(logo.frames[0], (640 - logo.width) / 2, 32);
@@ -458,6 +458,7 @@ export class FrontEnd {
     if (!game) return;
     this.menu.hide();
     this.state = "playing";
+    this.status("");
     game.paused = false;
     if (game.services.player) game.services.player.frozen = false;
     game.input.lock();

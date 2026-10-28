@@ -99,6 +99,7 @@ class Hud {
   private game: Game;
   private assets: UiAssets;
   private canvas = document.createElement("canvas");
+  private mask = document.createElement("canvas");
   private ctx = this.canvas.getContext("2d")!;
   private sprites = new Map<string, Sprite | null>();
   private font1!: UiFont;
@@ -456,14 +457,23 @@ class Hud {
     const r = H * (binoculars ? 0.42 : 0.47);
     const lenses = binoculars ? [W / 2 - r * 0.62, W / 2 + r * 0.62] : [W / 2];
     ctx.save();
-    ctx.fillStyle = "#000";
-    ctx.beginPath();
-    ctx.rect(0, 0, W, H);
+    // Black everywhere except the lenses (built on a scratch canvas so overlapping lenses stay open).
+    const mask = this.mask;
+    mask.width = this.canvas.width;
+    mask.height = this.canvas.height;
+    const m = mask.getContext("2d")!;
+    m.setTransform(ctx.getTransform());
+    m.fillStyle = "#000";
+    m.fillRect(0, 0, W, H);
+    m.globalCompositeOperation = "destination-out";
     for (const cx of lenses) {
-      ctx.moveTo(cx + r, H / 2);
-      ctx.arc(cx, H / 2, r, 0, Math.PI * 2, true);
+      m.beginPath();
+      m.arc(cx, H / 2, r, 0, Math.PI * 2);
+      m.fill();
     }
-    ctx.fill("evenodd");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(mask, 0, 0);
+    ctx.setTransform(m.getTransform());
     // Soft dark lens edge.
     for (const cx of lenses) {
       const g = ctx.createRadialGradient(cx, H / 2, r * 0.8, cx, H / 2, r);

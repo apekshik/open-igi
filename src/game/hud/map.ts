@@ -239,10 +239,16 @@ export class MapComputer {
       if (p) [this.view.x, this.view.y] = [p[0], p[1]];
     });
     y += 8;
-    const legend: [string, string][] = [["h_player", "JONES"], ["h_guard", "ENEMY"], ["h_1", "OBJECTIVE"]];
+    const legend: [string, string][] = [["h_player", "JONES"], ["", "ENEMY"], ["h_1", "OBJECTIVE"]];
     for (const [sprite, label] of legend) {
       const s = this.sprites.get(sprite);
-      if (s) ctx.drawImage(s.frames[0], x + 18, y, 18, (18 * s.height) / s.width);
+      if (s) ctx.drawImage(s.frames[0], x + 27 - (12 * s.width) / s.height / 2, y, (12 * s.width) / s.height, 12);
+      else {
+        ctx.fillStyle = "#ff3a2a";
+        ctx.beginPath();
+        ctx.arc(x + 27, y + 6, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
       this.small.draw(ctx, label, x + 46, y + 4, { color: GREEN });
       y += 26;
     }
@@ -319,10 +325,14 @@ export class MapComputer {
       }
       ctx.restore();
     };
-    // Enemies: every living soldier, as IGI's map computer tracks them in real time.
+    // Enemies: every living soldier as a red dot, as IGI's map computer tracks them in real time.
     for (const e of this.game.entities.all()) {
       if (!e.alive || e.kind !== "soldier") continue;
-      icon("h_guard", e.position, 14);
+      const [sx, sy] = this.toScreen(e.position, r);
+      ctx.fillStyle = "#ff3a2a";
+      ctx.beginPath();
+      ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
+      ctx.fill();
     }
     // Objectives with a known position (MissionService objectives may carry one).
     const objectives = this.game.services.mission?.objectives() ?? [];
@@ -464,7 +474,11 @@ export class MapComputer {
     try {
       renderer.setRenderTarget(this.target);
       renderer.clear();
+      // Extra light from above so roofs read on the satellite image.
+      const sun = new THREE.AmbientLight(0xffffff, 1.5);
+      game.scene.add(sun);
       renderer.render(game.scene, camera);
+      game.scene.remove(sun);
       const pixels = new Uint8Array(IMAGE * IMAGE * 4);
       renderer.readRenderTargetPixels(this.target, 0, 0, IMAGE, IMAGE, pixels);
       // WebGL rows run bottom-up.
