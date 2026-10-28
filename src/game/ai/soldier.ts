@@ -298,11 +298,12 @@ export class Soldier implements AiCharacter {
     // friendly team advances that way); without this every task field read 0.
     const mission = this.game.services.mission;
     const scriptVariable = (name: string): ScriptValue => mission?.evaluate(name) ?? 0;
+    const scriptAssign = (name: string, value: ScriptValue) => mission?.assign?.(name, Number(value) || 0);
     const level = this.world.script(this.aiId);
     const common = this.world.commonScript(this.aiType);
     const natives = this.natives(queued, common, scriptVariable);
-    if (level) runScript(level, natives, scriptVariable);
-    else if (common) runScript(common, natives, scriptVariable);
+    if (level) runScript(level, natives, scriptVariable, scriptAssign);
+    else if (common) runScript(common, natives, scriptVariable, scriptAssign);
     else natives.AIFunction_DefaultHandler();
   }
 

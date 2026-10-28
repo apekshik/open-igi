@@ -46,6 +46,8 @@ export interface MissionService {
    * AIStationaryGunHolder's "On expression". `selfTaskId` binds `this`.
    */
   evaluate(expression: string, selfTaskId?: number): number | string;
+  /** Write a task variable from an AI script (`EditVariable_173.nValue = 2`). Unknown or read-only names are ignored. */
+  assign?(name: string, value: number): void;
   /** Let an entity (an AI soldier) use a door or switch by task id. Returns false if not usable now. */
   use(entityId: number, taskId: number): boolean;
   /** Alarm pads (switches that set off an AlarmControl), for AI soldiers running to raise the alarm. */

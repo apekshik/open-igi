@@ -104,7 +104,16 @@ Parameters are named from each script's `Task_DeclareParameters`; `ObjectPos`/`R
 Alarm logic is entirely scripted: an `AlarmControl`'s trigger watches alarm pads (`Switch.isLastPressed`) and camera
 detection, an `EditVariable` latches the alarm, and `isAlarm` reads it back. When an AI soldier raises the alarm
 (`alarm` event) we press the nearest pad, so the level's own consequences (messages, doors, lights, guard spawns)
-follow.
+follow. If the level's alarm does not come on (its AlarmControl is switched off: level9 once the security terminal is
+hacked), we re-send the real state, `alarm` off, half a second later, so soldiers and sirens do not stay in alarm.
+
+**Damage scale** (the ExplodeObject block) is the object's toughness in IGI damage units, the same units as a weapon's
+Damage Factor (an AI soldier dies at 1.0): computers and barrels have 1 and blow after a few rifle rounds, level8's
+SAM launcher 99 and level6's fuel tanks 100, so only their scripted airstrike / C4 destroys them, and 0 means the first
+hit. Hit zones (head x100) apply to characters only.
+
+AI level scripts read task variables (`HumanSoldier_404.isDead`) and also write them: level10's Priboi script runs
+`EditVariable_173.nValue = 2`. `MissionService.assign` takes those writes (EditVariable values only).
 
 ### Cutscene cameras
 
