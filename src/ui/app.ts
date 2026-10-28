@@ -48,6 +48,8 @@ export class FrontEnd {
   private state: State = "menu";
   private stats: Stats = { shots: 0, hits: 0, kills: 0, alarms: 0 };
   private mapWasOpen = false;
+  /** A mission:end waiting to be shown: after a short delay, and only once the outro cutscene has played out. */
+  private pendingEnd: { success: boolean; reason: string; wait: number } | null = null;
   private menuOpenedAt = 0;
   private loadToken = 0;
   private cleanup: (() => void)[] = [];
@@ -376,6 +378,7 @@ export class FrontEnd {
 
     const params = new URLSearchParams(location.search);
     this.stats = { shots: 0, hits: 0, kills: 0, alarms: 0 };
+    this.pendingEnd = null;
     let game: Game;
     try {
       game = await Game.start({
@@ -430,11 +433,17 @@ export class FrontEnd {
             if (e.entityId === player()) setTimeout(() => game === fe.game && fe.gameOver(), 2500);
           }),
           game.events.on("alarm", (e) => e.active && fe.stats.alarms++),
-          game.events.on("mission:end", (e) => setTimeout(() => game === fe.game && fe.missionEnd(e.success, e.reason), e.success ? 1500 : 2500)),
+          // LevelFlow can complete before the outro ends (level12 completes on its first of three outro cutscenes).
+          game.events.on("mission:end", (e) => (fe.pendingEnd = { success: e.success, reason: e.reason, wait: e.success ? 1.5 : 2.5 })),
         ];
       },
-      lateUpdate(_dt, game) {
+      lateUpdate(dt, game) {
         if (game !== fe.game) return;
+        const end = fe.pendingEnd;
+        if (end && (end.wait -= dt) <= 0 && !game.services.mission?.cutscene()) {
+          fe.pendingEnd = null;
+          fe.missionEnd(end.success, end.reason);
+        }
         const mapOpen = game.services.hud?.mapOpen ?? false;
         if (fe.state === "playing" && !mapOpen && !fe.mapWasOpen && game.input.wasPressed("pause")) fe.pause();
         fe.mapWasOpen = mapOpen;
@@ -544,7 +553,8 @@ export class FrontEnd {
     const time = `${Math.floor(elapsed / 60)}:${String(Math.floor(elapsed % 60)).padStart(2, "0")}`;
     const accuracy = this.stats.shots ? `${Math.round((Math.min(this.stats.hits, this.stats.shots) / this.stats.shots) * 100)}%` : "-";
     const lines = [
-      ...(reason ? [reason] : []),
+      // LevelFlow's "complete"/"failed" restate the title; only a time-out says more.
+      ...(reason === "time" ? ["Out of time."] : []),
       `Mission time:  ${time}`,
       `Enemies killed:  ${this.stats.kills}`,
       `Shots fired:  ${this.stats.shots}`,

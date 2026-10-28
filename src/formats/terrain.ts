@@ -12,9 +12,23 @@ export interface CtrNode {
 }
 
 const CTR_RECORD = 32;
+const CTR_RECORD_44 = 44;
+/** At +0x24 of every 44-byte record (flawme/igi-reverse-engineering, docs 16-verified-formats). */
+const CTR_44_SIGNATURE = [0xef, 0xff, 0xff, 0xff, 0x5f, 0xfe, 0xff, 0x07];
+
+/**
+ * Level 14's .ctr has 44-byte records (same first 25 bytes) and no .cmd offsets: its .cmd is a linear run of
+ * 4,779 meshes for 11,055 cubes, and how cubes pick their mesh is not known yet. Its size is also a multiple of 32,
+ * so it is told apart by the constant bytes every 44-byte record carries.
+ */
+export function isCtr44(bytes: Uint8Array): boolean {
+  if (bytes.length % CTR_RECORD_44 || bytes.length < 2 * CTR_RECORD_44) return false;
+  return CTR_44_SIGNATURE.every((b, i) => bytes[CTR_RECORD_44 + 0x24 + i] === b);
+}
 
 export function parseCtr(bytes: Uint8Array): CtrNode[] {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (isCtr44(bytes)) throw new Error(".ctr has 44-byte records (level14), whose cube meshes cannot be located yet");
   if (bytes.length % CTR_RECORD) throw new Error(`.ctr size ${bytes.length} is not a multiple of ${CTR_RECORD}`);
   const nodes: CtrNode[] = [];
   for (let at = 0; at < bytes.length; at += CTR_RECORD) {

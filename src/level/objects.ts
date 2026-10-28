@@ -43,11 +43,19 @@ export interface TerrainLightMapTask {
   index: number;
 }
 
+/** DiscardTerrain: the terrain cube at `level` containing `position` (and its subtree) is not drawn or collided. */
+export interface DiscardTerrainTask {
+  position: [number, number, number];
+  level: number;
+}
+
 export interface LevelObjects {
   placements: Placement[];
   heightMaps: HeightMapTask[];
   textureModifiers: TextureModifierTask[];
   terrainLightMaps: TerrainLightMapTask[];
+  /** Holes cut in the terrain for tunnels and bunkers (level3, 5-9, 11-13). */
+  discardTerrain: DiscardTerrainTask[];
   /** Position of the HumanPlayer task, if found. */
   playerStart: [number, number, number] | null;
   /** Count of every task type in the tree, for research. */
@@ -62,6 +70,7 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
   const heightMaps: HeightMapTask[] = [];
   const textureModifiers: TextureModifierTask[] = [];
   const terrainLightMaps: TerrainLightMapTask[] = [];
+  const discardTerrain: DiscardTerrainTask[] = [];
   const typeCounts = new Map<string, number>();
   let playerStart: [number, number, number] | null = null;
 
@@ -95,6 +104,9 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
     } else if (t === "TerrainLightMap") {
       // TerrainLightMap: position, level, size, texture index, generated when created.
       terrainLightMaps.push({ position: [p[0], p[1], p[2]], level: p[3], size: p[4], index: p[5] });
+    } else if (t === "DiscardTerrain") {
+      // DiscardTerrain: position, level.
+      discardTerrain.push({ position: [p[0], p[1], p[2]], level: p[3] });
     } else if (t === "HumanPlayer" && playerStart === null) {
       // HumanPlayer: position, gamma, model, team. Mission 1 names it "TheGoodGuy".
       playerStart = [p[0], p[1], p[2]];
@@ -104,7 +116,7 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
   }
 
   for (const s of statements) visit(s);
-  return { placements, heightMaps, textureModifiers, terrainLightMaps, playerStart, typeCounts };
+  return { placements, heightMaps, textureModifiers, terrainLightMaps, discardTerrain, playerStart, typeCounts };
 }
 
 function isCall(v: QvmValue): v is QvmCall {

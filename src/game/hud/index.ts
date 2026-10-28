@@ -159,11 +159,10 @@ class Hud {
     const playerId = () => this.game.services.player?.entity.id ?? -1;
     this.off.push(
       ev.on("message", (m) => this.message(m.text, m.seconds)),
-      ev.on("objective", (o) => {
-        const text = o.text ?? this.game.services.mission?.objectives()[o.index]?.text ?? `Objective ${o.index + 1}`;
-        const verb = o.state === "completed" ? "Objective completed" : o.state === "failed" ? "Objective failed" : "New objective";
-        this.message(`${verb}: ${text}`, 5);
-      }),
+      // The mission system already announces objective changes with the game's own text ("Objective 1 Complete."),
+      // so objective events only update the map computer.
+      // StatusMessageScreen_ClearMessages(): gameplay start drops the intro's subtitles (e.g. after skipping it).
+      ev.on("status:clear", () => (this.messages = [])),
       ev.on("pickup", (p) => {
         if (p.ownerId !== playerId()) return;
         const key = weaponKey(p.item);

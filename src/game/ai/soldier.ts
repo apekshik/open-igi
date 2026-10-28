@@ -111,6 +111,9 @@ interface Action {
 /** Events that mean the character knows there is an enemy about. */
 const THREAT = /GUNSHOT|DAMAGE|EXPLOSION|GRENADE|FLASHBANG|ENEMY|ALERT|COMBAT/;
 
+/** Soldiers already alerted by the shout being relayed right now (see Soldier.shout). */
+let shoutRelay: Set<Soldier> | null = null;
+
 const rand = Math.random;
 const pick = <T>(list: readonly T[]) => list[Math.floor(rand() * list.length)];
 const yawTo = (from: Vec3, to: Vec3) => Math.atan2(-(to[0] - from[0]), to[1] - from[1]);
@@ -337,13 +340,23 @@ export class Soldier implements AiCharacter {
   /** Tell nearby comrades (AIEVENT_ALERT) where the enemy is. */
   shout() {
     if (!this.lastKnown) return;
-    for (const other of this.world.characters()) {
-      if (other === this || !other.alive || other.team !== this.team) continue;
-      const d = dist(other.position, this.position);
-      if (d < 15 * METRE || (d < 35 * METRE && this.game.services.physics?.lineOfSight(this.eye(), other.eye()))) {
-        other.lastKnown ??= [...this.lastKnown];
-        other.post("AIEVENT_ALERT", { position: this.lastKnown });
+    // An alerted soldier's script usually answers with AIFunction_SendResponse() and shouts on, so a shout relays
+    // through the squad. Each soldier is alerted at most once per relay, or two guards in earshot of each other
+    // re-alert each other forever (stack overflow).
+    const top = !shoutRelay;
+    const relay = (shoutRelay ??= new Set<Soldier>([this]));
+    try {
+      for (const other of this.world.characters()) {
+        if (other === this || !other.alive || other.team !== this.team || relay.has(other)) continue;
+        const d = dist(other.position, this.position);
+        if (d < 15 * METRE || (d < 35 * METRE && this.game.services.physics?.lineOfSight(this.eye(), other.eye()))) {
+          relay.add(other);
+          other.lastKnown ??= [...this.lastKnown];
+          other.post("AIEVENT_ALERT", { position: this.lastKnown });
+        }
       }
+    } finally {
+      if (top) shoutRelay = null;
     }
   }
 

@@ -916,6 +916,8 @@ export class DoorTask extends ObjectTask implements Usable {
   private openExpr = this.expr("Open door expression");
   private closeExpr = this.expr("Close door expression");
   private lastOpen = false;
+  /** The open expression's value last tick: doors open when it becomes true. */
+  private openWanted = false;
 
   get destructible() {
     return false;
@@ -942,7 +944,13 @@ export class DoorTask extends ObjectTask implements Usable {
     return super.field(name);
   }
   tick() {
-    if (this.test(this.openExpr) && this.open < 1) this.startMove(1);
+    // The open expression acts when it becomes true. Elevator doors open on "Elevator_N.vFloor == N", which stays
+    // true while their switch closes them; read as a level it re-opened them at once and no elevator could leave.
+    // Guarded expressions ("Door_N.isClosed && Terminal_N.isHacked") still re-open a door each time it shuts.
+    const wanted = this.test(this.openExpr);
+    const rising = wanted && !this.openWanted;
+    this.openWanted = wanted;
+    if (rising && this.open < 1) this.startMove(1);
     else if (this.test(this.closeExpr) && this.open > 0) this.startMove(-1);
     if (this.moving !== 0) {
       this.open = Math.min(1, Math.max(0, this.open + this.moving / (this.openTime * GAME_FREQUENCY)));
@@ -986,13 +994,17 @@ export class DoorTask extends ObjectTask implements Usable {
   }
   /** Door model transform at the current opening: slide along local X/Y or swing about Z by Max angle. */
   pose(): { position: Vec3; orientation: Vec3 } {
-    const g = this.orientation[2];
-    const c = Math.cos(g);
-    const s = Math.sin(g);
+    // The slide is along the model's local X/Y, so it turns with the full orientation (Euler ZYX, as the model is
+    // drawn), not just the heading: level12's blast doors (506_01_1) are tipped 90 degrees about Y and slide up.
+    const [a, b, g] = this.orientation;
+    const [sx, sy] = this.slide;
+    const y1 = sy * Math.cos(a), z1 = sy * Math.sin(a);
+    const x2 = sx * Math.cos(b) + z1 * Math.sin(b), z2 = -sx * Math.sin(b) + z1 * Math.cos(b);
+    const dx = x2 * Math.cos(g) - y1 * Math.sin(g), dy = x2 * Math.sin(g) + y1 * Math.cos(g);
     const f = this.open;
     const base = this.worldPosition();
-    const position: Vec3 = [base[0] + (this.slide[0] * c - this.slide[1] * s) * f, base[1] + (this.slide[0] * s + this.slide[1] * c) * f, base[2]];
-    return { position, orientation: [this.orientation[0], this.orientation[1], g + this.maxAngle * f] };
+    const position: Vec3 = [base[0] + dx * f, base[1] + dy * f, base[2] + z2 * f];
+    return { position, orientation: [a, b, g + this.maxAngle * f] };
   }
 }
 
@@ -1350,6 +1362,8 @@ export class ElevatorTask extends ObjectTask {
   private speed = (pnum(this.node, "Max speed", 2) || 2) * METRE;
   private canStart = this.expr("Can start");
   private wanted: Expr[] = [];
+  /** A floor asked for (switches pulse for one tick) and kept until "Can start" allows the ride. */
+  private request = -1;
   private up = this.expr("Floor up");
   private down = this.expr("Floor down");
 
@@ -1390,8 +1404,11 @@ export class ElevatorTask extends ObjectTask {
       });
       if (want < 0 && this.test(this.up)) want = Math.min(this.floors.length - 1, Math.round(this.pos) + 1);
       if (want < 0 && this.test(this.down)) want = Math.max(0, Math.round(this.pos) - 1);
-      if (want >= 0 && want !== Math.round(this.pos) && this.test(this.canStart, true)) {
-        this.target = want;
+      if (want >= 0 && want !== Math.round(this.pos)) this.request = want;
+      // The call closes the doors first; the car leaves once they are shut.
+      if (this.request >= 0 && this.test(this.canStart, true)) {
+        this.target = this.request;
+        this.request = -1;
         this.moving = true;
         this.L.emit("elevator", { taskId: this.node.id, moving: true, sound: pstr(this.node, "Start sound") });
       }
