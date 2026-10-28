@@ -679,6 +679,8 @@ export class AreaActivateTask extends LogicTask {
   private vehicleInside = new Map<LogicTask, boolean>();
   /** Whether the player was inside at the last tick its HumanPlayer task existed. */
   private playerInside = false;
+  /** Whether each friendly soldier (by task id) was inside at the last tick it was in play. */
+  private allyInside = new Map<number, boolean>();
 
   tick() {
     // Test a point just above the feet so slopes and stairs at the box floor still count.
@@ -709,7 +711,22 @@ export class AreaActivateTask extends LogicTask {
       // the player keeps its last answer: outro containers test the very area that started them.
       const player = this.L.world.player();
       if (player && this.L.playerActive()) this.playerInside = inside(player);
-      this.count = all.filter((e) => e.team === 0 && isHuman(e) && e !== player && inside(e)).length + (this.playerInside ? 1 : 0);
+      // Friendly soldiers too: Mission 4's outro runs on "AreaActivate_156.nActive" (Harrison and Josip at the
+      // helipad) and its start takes their container down with the player's; dropping them restarted the level.
+      // A dead one stops counting; one taken out of play keeps its last answer.
+      let n = this.playerInside ? 1 : 0;
+      const present = new Set<number>();
+      for (const e of all) {
+        if (e.team !== 0 || !isHuman(e) || e === player) continue;
+        const now = inside(e);
+        if (now) n++;
+        if (e.taskId === undefined) continue;
+        present.add(e.taskId);
+        if (e.alive) this.allyInside.set(e.taskId, now);
+        else this.allyInside.delete(e.taskId);
+      }
+      for (const [id, was] of this.allyInside) if (was && !present.has(id)) n++;
+      this.count = n;
     }
   }
 }
@@ -804,6 +821,9 @@ export class StatusMessageTask extends LogicTask {
     const rising = now && !this.wasTrue;
     this.wasTrue = now;
     if (!rising || (this.once && this.sent)) return;
+    // Once the level is over nothing more is said: an outro stopping restarts the gameplay container, whose messages
+    // would otherwise be sent again under the end screen (Missions 2 and 5).
+    if (this.L.ended) return;
     this.sent = true;
     this.sentTick = this.L.tickCount;
     const v = this.textExpr ? this.L.eval(this.textExpr, this) : "";
@@ -1075,6 +1095,8 @@ export class DoorTask extends ObjectTask implements Usable {
   private openWas = false;
   private closeWas = false;
   private lastOpen = false;
+  /** Closing because of its Close door expression (elevator doors): such a close is not undone by someone in the way. */
+  scriptedClose = false;
 
   get destructible() {
     return false;
@@ -1111,7 +1133,10 @@ export class DoorTask extends ObjectTask implements Usable {
     this.openWas = open;
     this.closeWas = close;
     if (openEdge && this.open < 1) this.startMove(1);
-    else if (closeEdge && this.open > 0) this.startMove(-1);
+    else if (closeEdge && this.open > 0) {
+      this.startMove(-1);
+      this.scriptedClose = true;
+    }
     if (this.moving !== 0) {
       this.open = Math.min(1, Math.max(0, this.open + this.moving / (this.openTime * GAME_FREQUENCY)));
       if ((this.moving > 0 && this.open >= 1) || (this.moving < 0 && this.open <= 0)) {
@@ -1150,6 +1175,7 @@ export class DoorTask extends ObjectTask implements Usable {
       this.picked = true;
       return;
     }
+    this.scriptedClose = false;
     this.startMove(this.open > 0.5 || this.moving > 0 ? -1 : 1);
   }
   /** Door model transform at an opening (default: the current one): slide along local X/Y or swing about Z by Max angle. */

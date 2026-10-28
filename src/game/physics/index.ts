@@ -199,6 +199,7 @@ export class IgiPhysics implements PhysicsService {
       model,
       setMatrix: (m) => body.setMatrix(m),
       carve: (m) => world.carve(body, m ?? body.matrix),
+      overlaps: (feet, radius, height) => body.enabled && world.pushOut(body, feet, radius, height, [0, 0]) !== null,
       setPose: (position, rotation) => body.setMatrix(placementMatrix({ type: "", name: "", id: -1, model, position, rotation }, origin)),
       get enabled() {
         return body.enabled;
@@ -258,7 +259,8 @@ export class IgiPhysics implements PhysicsService {
         const sticky = this.riding.get(e) === body && insideFootprint(body.localBounds, a, e.radius);
         if (sticky || this.world.supports(body, body.carried, p, e.radius)) {
           e.position = [b[0] + gx, b[1] + gy, b[2] + gz];
-          this.riding.set(e, body);
+          // Doors move whoever stands on their sill but are no platform: riding one would take the static world away.
+          if (this.game.entities.get(body.entityId ?? -1)?.kind !== "door") this.riding.set(e, body);
           done.add(e);
           carried++;
         } else {
@@ -285,7 +287,17 @@ export class IgiPhysics implements PhysicsService {
 
   move(feet: Vec3, delta: Vec3, radius: number, height: number, options?: MoveOptions): MoveResult {
     const rider = options?.entityId === undefined ? undefined : this.game.entities.get(options.entityId);
-    const ridingBody = rider ? this.riding.get(rider)?.id : undefined;
+    let ridingBody: number | undefined;
+    const body = rider ? this.riding.get(rider) : undefined;
+    if (rider && body) {
+      // Carrying only looks at colliders that moved this frame: a rider who walked off (or was moved off) a collider
+      // that has stopped (an elevator car at its floor) is released here, or it would go on ignoring the static world.
+      const [gx, gy, gz] = this.game.origin;
+      const a = [0, 0, 0];
+      toLocal(body.matrix, feet[0] - gx, feet[1] - gy, feet[2] - gz, a);
+      if (body.enabled && insideFootprint(body.localBounds, a, radius)) ridingBody = body.id;
+      else this.riding.delete(rider);
+    }
     const r = this.world.move(feet, delta, radius, height, ridingBody === undefined ? options : { ...options, ridingBody });
     return { position: r.position, grounded: r.grounded, ground: this.groundHit(r.ground) ?? undefined };
   }
