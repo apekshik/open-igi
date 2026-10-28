@@ -1062,13 +1062,17 @@ export class DoorTask extends ObjectTask implements Usable {
   }
   /** Door model transform at the current opening: slide along local X/Y or swing about Z by Max angle. */
   pose(): { position: Vec3; orientation: Vec3 } {
-    const g = this.orientation[2];
-    const c = Math.cos(g);
-    const s = Math.sin(g);
+    // The slide is along the model's local X/Y, so it turns with the full orientation (Euler ZYX, as the model is
+    // drawn), not just the heading: level12's blast doors (506_01_1) are tipped 90 degrees about Y and slide up.
+    const [a, b, g] = this.orientation;
+    const [sx, sy] = this.slide;
+    const y1 = sy * Math.cos(a), z1 = sy * Math.sin(a);
+    const x2 = sx * Math.cos(b) + z1 * Math.sin(b), z2 = -sx * Math.sin(b) + z1 * Math.cos(b);
+    const dx = x2 * Math.cos(g) - y1 * Math.sin(g), dy = x2 * Math.sin(g) + y1 * Math.cos(g);
     const f = this.open;
     const base = this.worldPosition();
-    const position: Vec3 = [base[0] + (this.slide[0] * c - this.slide[1] * s) * f, base[1] + (this.slide[0] * s + this.slide[1] * c) * f, base[2]];
-    return { position, orientation: [this.orientation[0], this.orientation[1], g + this.maxAngle * f] };
+    const position: Vec3 = [base[0] + dx * f, base[1] + dy * f, base[2] + z2 * f];
+    return { position, orientation: [a, b, g + this.maxAngle * f] };
   }
 }
 

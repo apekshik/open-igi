@@ -8,7 +8,7 @@
 // Walk conventions are shared with src/level/terrain.ts; the GetZ order follows hjcminus/Project-IGI-Terrain
 // (MIT, source/level/terrain.cpp), see THIRD_PARTY.md.
 
-import { CHILD_FOR_OCTANT, COMPOSE, LEAF_LEVEL, OCTANT, ROOT_HALF, type HeightPatch, type TerrainData, type TextureModifier } from "../../level/terrain.ts";
+import { CHILD_FOR_OCTANT, COMPOSE, discardedCubes, LEAF_LEVEL, OCTANT, ROOT_HALF, type HeightPatch, type TerrainData, type TextureModifier } from "../../level/terrain.ts";
 import { rayTriangle } from "./bvh.ts";
 
 const LEAF_SIZE = 2 * (ROOT_HALF / 2 ** LEAF_LEVEL);
@@ -51,6 +51,8 @@ export class TerrainCollider {
   private data: TerrainData;
   private origin: [number, number, number];
   private tasks = new Map<string, CubeTasks>();
+  /** DiscardTerrain cubes (tunnel mouths, bunkers): no collision inside them. */
+  private discarded: Set<string>;
   private columns = new Map<number, TerrainColumn>();
   // Scratch for one leaf mesh (at most 64 vertices: 6-bit indices).
   private vx = new Float64Array(64);
@@ -75,6 +77,13 @@ export class TerrainCollider {
     };
     for (const p of data.patches) slot(p).patches.push(p);
     for (const m of data.modifiers) slot(m).modifiers.push(m);
+    this.discarded = discardedCubes(data);
+  }
+
+  private isDiscarded(level: number, c: number[]): boolean {
+    if (!this.discarded.size) return false;
+    const half = ROOT_HALF / 2 ** level;
+    return this.discarded.has(cubeKey(level, c[0] - half, c[1] - half, c[2] - half));
   }
 
   /** Game material id of a terrain material (Ground, Snow, ...), or -1 if unknown. */
@@ -145,6 +154,7 @@ export class TerrainCollider {
   private getZ(index: number, cx: number, cy: number, cz: number, level: number, t: number, parent: Stacks, x: number, y: number): TerrainGround | null {
     const node = this.data.ctr[index];
     const c = [cx, cy, cz];
+    if (this.isDiscarded(level, c)) return null;
     const stacks = this.enter(parent, level, c);
     if (level === LEAF_LEVEL) {
       const n = this.leafVertices(node.cmdOffset, c, t, stacks);
@@ -202,6 +212,7 @@ export class TerrainCollider {
     const collect = (index: number, cx: number, cy: number, cz: number, level: number, t: number, parent: Stacks) => {
       const node = this.data.ctr[index];
       const c = [cx, cy, cz];
+      if (this.isDiscarded(level, c)) return;
       const stacks = this.enter(parent, level, c);
       if (level === LEAF_LEVEL) {
         const n = this.leafVertices(node.cmdOffset, c, t, stacks);

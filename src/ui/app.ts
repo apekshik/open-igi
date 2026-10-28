@@ -50,6 +50,8 @@ export class FrontEnd {
   private state: State = "menu";
   private stats: Stats = { shots: 0, hits: 0, kills: 0, alarms: 0 };
   private mapWasOpen = false;
+  /** A mission:end waiting to be shown: after a short delay, and only once the outro cutscene has played out. */
+  private pendingEnd: { success: boolean; reason: string; wait: number } | null = null;
   private flow = new PointerFlow();
   /** "Click to capture the mouse", shown while playing without pointer lock. */
   private hint = document.createElement("div");
@@ -402,6 +404,7 @@ export class FrontEnd {
 
     const params = new URLSearchParams(location.search);
     this.stats = { shots: 0, hits: 0, kills: 0, alarms: 0 };
+    this.pendingEnd = null;
     let game: Game;
     try {
       game = await Game.start({
@@ -456,11 +459,17 @@ export class FrontEnd {
             if (e.entityId === player()) setTimeout(() => game === fe.game && fe.gameOver(), 2500);
           }),
           game.events.on("alarm", (e) => e.active && fe.stats.alarms++),
-          game.events.on("mission:end", (e) => setTimeout(() => game === fe.game && fe.missionEnd(e.success, e.reason), e.success ? 1500 : 2500)),
+          // LevelFlow can complete before the outro ends (level12 completes on its first of three outro cutscenes).
+          game.events.on("mission:end", (e) => (fe.pendingEnd = { success: e.success, reason: e.reason, wait: e.success ? 1.5 : 2.5 })),
         ];
       },
-      lateUpdate(_dt, game) {
+      lateUpdate(dt, game) {
         if (game !== fe.game) return;
+        const end = fe.pendingEnd;
+        if (end && (end.wait -= dt) <= 0 && !game.services.mission?.cutscene()) {
+          fe.pendingEnd = null;
+          fe.missionEnd(end.success, end.reason);
+        }
         const mapOpen = game.services.hud?.mapOpen ?? false;
         // The key that closed the map this frame must not also pause.
         if (!mapOpen && !fe.mapWasOpen && game.input.wasPressed("pause")) fe.flowEvent({ type: "pauseKey", now: performance.now() });
