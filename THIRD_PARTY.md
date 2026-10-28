@@ -40,3 +40,6 @@ SOFTWARE.
 
 Format documentation for IGI's terrain files (`.ctr`, `.cmd`, `.hmp`, `.bit`, `.lmp`, terrain `.tex`) and the world
 scale (4096 units per metre), used as a cross-check for `docs/FORMATS.md`.
+
+The same project's audio notes (`reverse/docs/09-audio`, `reverse/tools/misc.py`) document the ILSF sound container and
+its IMA ADPCM codec, which `src/formats/ilsf.ts` implements.

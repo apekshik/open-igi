@@ -232,3 +232,24 @@ it add `(bilinear(h) - 64) * 256` to their vertex heights.
 Not yet used: `.lmp` (8-bit lightmaps: repeated `u32 size, u8[size²]`), `terrain.tex` (LOOP v9, 18 textures of
 128×128 ARGB1555), `.bit` (texture-modifier bitmaps, same slot table as `.hmp` but 1 bit per cell), and
 `terrain.qvm` (`CreateTerrainMaterial` and tile-map tables).
+
+## ILSF (sounds)
+
+Every sound is ILSF, not RIFF: the loose `.wav` files (e.g. `missions/location0/level*/sounds/`) and the `BODY` entries of
+`common/sounds/sounds.res` and `menusystem/SOUND/sounds.res`. Header and codec follow flawme/igi-reverse-engineering
+(`reverse/docs/09-audio`, see THIRD_PARTY.md); `src/formats/ilsf.ts` decodes them to Float32 PCM.
+
+```
+"ILSF"  u16 version  u16 bits (always 16)  u16 channels (1|2)  u16 flags  u32 sampleRate  u32 frames  data @ 0x14
+```
+
+`version` is a bitfield: bit 0 = inside a `.res` (the `.res` ones carry flags 0x1002, loose ones 0; flags are unused),
+bit 1 = compressed. So v0/v1 are 16-bit little-endian interleaved PCM and v2/v3 are 4-bit IMA ADPCM. `frames` is
+samples per channel (not the byte size). The ADPCM stream has no block headers: one nibble per sample, high nibble
+first, channels interleaved nibble by nibble, predictor 0 and step index 0 at the start, standard IMA step table.
+Data is `frames*channels*2` bytes (PCM) or `ceil(frames*channels/2)` bytes (ADPCM); a zero pad byte may follow.
+
+**Check:** all 740 ILSF sounds in the install (394 loose, 346 in archives) decode with the payload size matching the
+header exactly (538 exact, 202 with one pad byte). Mix: v0 3, v1 338, v2 410, v3 8; 11025/22050/44100 Hz, mono and
+stereo. No file is silent (RMS 0.009 to 0.50); the loudest explosions clip on up to 5% of samples, as mastered. Mission
+dialogue decodes as speech (about 3000 zero crossings/s, 4 to 6 Hz syllabic envelope, 13 to 70x loud/quiet dynamics).
