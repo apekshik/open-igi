@@ -69,6 +69,8 @@ const IMPACT_PARTS: Record<string, number> = {
 const SLOT_KEYS: Action[] = ["weapon1", "weapon2", "weapon3", "weapon4", "weapon5", "weapon6", "weapon7", "weapon8", "weapon9"];
 const FIREARMS = new Set(["GUN", "PISTOL", "SHOTGUN"]);
 const THROWN = new Set(["GRENADE", "PROXIMITYMINE"]);
+/** Entities that bleed when shot; others (doors, vehicles, terminals) take damage but show a surface impact. */
+const FLESH_KINDS = new Set(["player", "soldier", "civilian", "human"]);
 
 const displayName = (s: WeaponSpec) => s.name.replace(/[<>]/g, "");
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -347,6 +349,8 @@ class Arsenal implements WeaponsService {
         prev.amount += spec.damage * zone * (options.damageScale ?? 1);
         if (zone > prev.zone) Object.assign(prev, { zone, point: hit.point, part: hit.part });
         damage.set(target.id, prev);
+      }
+      if (target && FLESH_KINDS.has(target.kind)) {
         this.effects.impact(hit.point, vec3.scale(d, -1), true);
         if (i === 0 || Math.random() < 0.15) this.effects.blood(hit.point, physics?.groundHeight(hit.point[0], hit.point[1], hit.point[2]) ?? null);
       } else {
@@ -356,7 +360,7 @@ class Arsenal implements WeaponsService {
       this.game.events.emit("weapon:impact", { ownerId, weapon: spec.id, point: hit.point, normal: hit.normal, entityId: hit.entityId, part: hit.part });
     }
     for (const [id, d] of damage) {
-      this.sound(`bul_flesh_${1 + Math.floor(Math.random() * 5)}`, d.point, 30 * METRE);
+      if (FLESH_KINDS.has(this.game.entities.get(id)?.kind ?? "")) this.sound(`bul_flesh_${1 + Math.floor(Math.random() * 5)}`, d.point, 30 * METRE);
       this.applyFactor(id, d.amount, ownerId, d.point, dir, d.part);
     }
     this.game.events.emit("weapon:fire", { ownerId, weapon: spec.id, origin, direction: dir, silenced: spec.detection.includes("SILENCED") });

@@ -916,6 +916,9 @@ export class DoorTask extends ObjectTask implements Usable {
   private openExpr = this.expr("Open door expression");
   private closeExpr = this.expr("Close door expression");
   private lastOpen = false;
+  /** Last tick's open/close expression values: doors react when an expression becomes true. */
+  private wasOpenExpr = false;
+  private wasCloseExpr = false;
 
   get destructible() {
     return false;
@@ -942,8 +945,14 @@ export class DoorTask extends ObjectTask implements Usable {
     return super.field(name);
   }
   tick() {
-    if (this.test(this.openExpr) && this.open < 1) this.startMove(1);
-    else if (this.test(this.closeExpr) && this.open > 0) this.startMove(-1);
+    // Edge-triggered: an elevator door's "Open door expression" (`Elevator_51.vFloor == 0`) stays true while the car
+    // waits at its floor, and a call button's close pulse must still be able to shut it.
+    const openNow = this.test(this.openExpr);
+    const closeNow = this.test(this.closeExpr);
+    if (openNow && !this.wasOpenExpr && this.open < 1) this.startMove(1);
+    else if (closeNow && !this.wasCloseExpr && this.open > 0) this.startMove(-1);
+    this.wasOpenExpr = openNow;
+    this.wasCloseExpr = closeNow;
     if (this.moving !== 0) {
       this.open = Math.min(1, Math.max(0, this.open + this.moving / (this.openTime * GAME_FREQUENCY)));
       if ((this.moving > 0 && this.open >= 1) || (this.moving < 0 && this.open <= 0)) {
@@ -984,12 +993,11 @@ export class DoorTask extends ObjectTask implements Usable {
     }
     this.startMove(this.open > 0.5 || this.moving > 0 ? -1 : 1);
   }
-  /** Door model transform at the current opening: slide along local X/Y or swing about Z by Max angle. */
-  pose(): { position: Vec3; orientation: Vec3 } {
+  /** Door model transform at an opening (default: the current one): slide along local X/Y or swing about Z by Max angle. */
+  pose(f = this.open): { position: Vec3; orientation: Vec3 } {
     const g = this.orientation[2];
     const c = Math.cos(g);
     const s = Math.sin(g);
-    const f = this.open;
     const base = this.worldPosition();
     const position: Vec3 = [base[0] + (this.slide[0] * c - this.slide[1] * s) * f, base[1] + (this.slide[0] * s + this.slide[1] * c) * f, base[2]];
     return { position, orientation: [this.orientation[0], this.orientation[1], g + this.maxAngle * f] };
@@ -1347,6 +1355,11 @@ export class ElevatorTask extends ObjectTask {
   pos = pnum(this.node, "Pos");
   target = Math.round(this.pos);
   moving = false;
+  /**
+   * A requested floor waiting for "Can start". Calls are one-tick pulses (`Switch.isLastPressed`) that also close
+   * the doors, while "Can start" waits for the doors to be closed, so the request has to be remembered.
+   */
+  private requested = -1;
   private speed = (pnum(this.node, "Max speed", 2) || 2) * METRE;
   private canStart = this.expr("Can start");
   private wanted: Expr[] = [];
@@ -1390,8 +1403,10 @@ export class ElevatorTask extends ObjectTask {
       });
       if (want < 0 && this.test(this.up)) want = Math.min(this.floors.length - 1, Math.round(this.pos) + 1);
       if (want < 0 && this.test(this.down)) want = Math.max(0, Math.round(this.pos) - 1);
-      if (want >= 0 && want !== Math.round(this.pos) && this.test(this.canStart, true)) {
-        this.target = want;
+      if (want >= 0) this.requested = want !== Math.round(this.pos) ? want : -1;
+      if (this.requested >= 0 && this.test(this.canStart, true)) {
+        this.target = this.requested;
+        this.requested = -1;
         this.moving = true;
         this.L.emit("elevator", { taskId: this.node.id, moving: true, sound: pstr(this.node, "Start sound") });
       }

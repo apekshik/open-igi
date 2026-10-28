@@ -1,5 +1,7 @@
 // Renders the mission's interactive objects (doors, gates, switches, terminals, security cameras, explodables,
-// mission pickups, elevators) and registers them as entities, so bullets can hit them and the map can find them.
+// mission pickups, elevators) and registers them as entities, so bullets can hit them and the map can find them. Each
+// model's collision sets go to the physics system as a dynamic collider at the object's current pose, so closed doors
+// block movement, bullets and sight, and elevator cars carry whoever stands in them.
 // Static scenery (Building, EditRigidObj) is placed by Game itself; these are the objects.qvm tasks whose state the
 // mission logic changes.
 
@@ -7,6 +9,7 @@ import * as THREE from "three";
 import type { Vec3 } from "../coords.ts";
 import type { Entity } from "../entity.ts";
 import type { Game } from "../game.ts";
+import type { DynamicCollider } from "../physics/api.ts";
 import { DoorTask, ElevatorTask, GenericPickupTask, ObjectTask, SCameraTask, SwitchTask, TerminalTask, type MissionLogic } from "./logic.ts";
 
 const KIND: [new (...a: never[]) => ObjectTask, string][] = [
@@ -26,6 +29,7 @@ interface Visual {
   /** Security camera lens (rotates under the holder). */
   lens?: { mesh: THREE.Mesh | null; model: string };
   entity: Entity;
+  collider: DynamicCollider | null;
 }
 
 export class MissionObjects {
@@ -57,7 +61,7 @@ export class MissionObjects {
         object: group,
         ...(t.node.id >= 0 ? { taskId: t.node.id } : {}),
       });
-      const v: Visual = { task: t, group, mesh: null, model: "", entity };
+      const v: Visual = { task: t, group, mesh: null, model: "", entity, collider: null };
       if (t instanceof SCameraTask) v.lens = { mesh: null, model: "" };
       this.visuals.push(v);
       this.entityTasks.set(entity.id, t);
@@ -71,6 +75,8 @@ export class MissionObjects {
         const c = box.getCenter(new THREE.Vector3());
         t.center = [c.x, c.y, c.z];
       }
+      // Doors and elevator cars are hit through their collision shape (the collider reports the entity), not a capsule.
+      if (v.collider && (t instanceof DoorTask || t instanceof ElevatorTask)) entity.radius = 0;
     }
   }
 
@@ -82,11 +88,15 @@ export class MissionObjects {
   private sync(v: Visual) {
     const t = v.task;
     const model = t.currentModel();
+    let rebuilt = false;
     if (model !== v.model) {
       v.model = model;
       if (v.mesh) v.group.remove(v.mesh);
       v.mesh = this.build(model);
       if (v.mesh) v.group.add(v.mesh);
+      v.collider?.remove();
+      v.collider = null;
+      rebuilt = true;
     }
     let pos: Vec3 = t.worldPosition();
     let rot: Vec3 = t.orientation;
@@ -107,6 +117,25 @@ export class MissionObjects {
     v.group.position.copy(this.game.local(pos));
     v.group.rotation.set(rot[0], rot[1], rot[2], "ZYX");
     v.group.visible = t.active && !!model;
+    if (rebuilt && model) {
+      v.group.updateMatrix();
+      v.collider = this.game.services.physics?.addDynamic?.(model, v.group.matrix.elements, { entityId: v.entity.id }) ?? null;
+      // Some buildings carry the closed door leaf in their own collision; the Door object takes its place.
+      if (v.collider && t instanceof DoorTask) {
+        const closed = t.pose(0);
+        const m = new THREE.Matrix4().compose(
+          this.game.local(closed.position),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(closed.orientation[0], closed.orientation[1], closed.orientation[2], "ZYX")),
+          new THREE.Vector3(1, 1, 1),
+        );
+        v.collider.carve(m.elements);
+      }
+    }
+    if (v.collider) {
+      v.group.updateMatrix();
+      v.collider.setMatrix(v.group.matrix.elements);
+      v.collider.enabled = v.group.visible;
+    }
     v.entity.position = pos;
     v.entity.alive = !t.exploded && t.active && !!model;
     v.entity.health = Math.max(0, t.health);
@@ -120,6 +149,7 @@ export class MissionObjects {
 
   dispose() {
     for (const v of this.visuals) {
+      v.collider?.remove();
       v.group.removeFromParent();
       this.game.entities.remove(v.entity.id);
     }

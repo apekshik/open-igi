@@ -260,10 +260,19 @@ export class Soldier implements AiCharacter {
   /** The engine side of the scripts: AIFunction_* queries/settings and AIAction_* actions. */
   private natives(queued: Action[], common: QvmScript | null): ScriptNatives {
     const n = (v: ScriptValue | undefined) => (typeof v === "number" ? v : 0);
+    // The common script can itself fall back on the default handler (e.g. for AIEVENT_DOOR): then use the built-in one.
+    let inCommon = false;
     const natives: ScriptNatives = {
       AIFunction_GetCurrentEventType: () => this.event,
       AIFunction_DefaultHandler: () => {
-        if (common) runScript(common, natives);
+        if (common && !inCommon) {
+          inCommon = true;
+          try {
+            runScript(common, natives);
+          } finally {
+            inCommon = false;
+          }
+        }
         else if (this.event === "AIEVENT_IDLE") queued.push(idle(2));
         else if (this.event === "AIEVENT_DEAD") queued.push(dead());
         else if (/ENEMYDETECTION|GUNSHOT|TAKINGDAMAGE|ALERT/.test(this.event)) this.pendingCombat = true;

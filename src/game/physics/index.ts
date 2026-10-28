@@ -1,13 +1,16 @@
 // Physics: IGI's own collision data. Static models collide with their .mef collision sets (the material-tagged "hit"
 // shape for rays, the pre-grown "human" hull for movement), terrain with the octree's leaf meshes at full detail,
-// entities with vertical capsules. See load.ts / world.ts and docs/formats/collision.md.
+// entities with vertical capsules. Doors, elevators, vehicles and trains register dynamic colliders (addDynamic) whose
+// pose their owners update every frame; this system carries characters standing on them and pushes characters out of
+// their way. See load.ts / world.ts, docs/formats/collision.md and docs/formats/dynamic.md.
 import * as THREE from "three";
 import { METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Game, GameSystem } from "../game.ts";
 import type { Placement } from "../../level/objects.ts";
-import type { GroundHit, MoveOptions, MoveResult, PhysicsService, RayHit, RaycastOptions } from "./api.ts";
-import { buildCollisionWorld, type PlacedModel } from "./load.ts";
-import type { CollisionWorld, GroundInfo } from "./world.ts";
+import { decodeCollision, type ModelCollision } from "../../formats/collision.ts";
+import type { DynamicCollider, GroundHit, MoveOptions, MoveResult, PhysicsService, RayHit, RaycastOptions } from "./api.ts";
+import { buildCollisionWorld, placementMatrix, type PlacedModel } from "./load.ts";
+import { toLocal, toWorld, type CollisionWorld, type DynamicBody, type GroundInfo } from "./world.ts";
 
 export function physicsSystem(): GameSystem {
   return {
@@ -40,8 +43,16 @@ export function physicsSystem(): GameSystem {
           `${(performance.now() - started).toFixed(0)} ms`,
       );
     },
+    // After every system's update (doors, elevators and vehicles have moved this frame, characters have walked) and
+    // before the player places its camera: riders move with their platform in the same frame.
+    lateUpdate(_dt, game) {
+      if (!game.paused) (game.services.physics as IgiPhysics | undefined)?.carry?.();
+    },
   };
 }
+
+/** Entity kinds that ride platforms and get pushed by moving colliders. */
+const RIDERS = new Set(["player", "soldier", "civilian", "human"]);
 
 const PREWARM_RADIUS = 150 * METRE;
 
@@ -59,7 +70,10 @@ export class IgiPhysics implements PhysicsService {
   }
 
   private groundHit(g: GroundInfo | null): GroundHit | null {
-    return g && { z: g.z, normal: g.normal, material: this.world.materialName(g.material) };
+    if (!g) return null;
+    const hit: GroundHit = { z: g.z, normal: g.normal, material: this.world.materialName(g.material) };
+    if (g.body >= 0) hit.platform = g.body;
+    return hit;
   }
 
   groundHeight(x: number, y: number, fromZ?: number): number | null {
@@ -81,6 +95,15 @@ export class IgiPhysics implements PhysicsService {
       part: this.world.materialName(w.material),
       model: w.object >= 0 ? this.world.objects[w.object].model : undefined,
     };
+    if (best && w && w.body >= 0) {
+      const body = this.colliders.get(w.body);
+      best.collider = w.body;
+      best.model = body?.model;
+      if (body?.entityId != null) {
+        if (body.entityId === options?.ignoreEntity) return this.raycastPast(from, to, w.distance, options);
+        if (options?.entities !== false) best.entityId = body.entityId;
+      }
+    }
     if (options?.entities === false) return best;
     const d = vec3.sub(to, from);
     const len = vec3.length(d);
@@ -103,6 +126,119 @@ export class IgiPhysics implements PhysicsService {
       };
     }
     return best;
+  }
+
+  /** Continue a ray past a collider owned by the ignored entity (a vehicle's own gunner shooting out). */
+  private raycastPast(from: Vec3, to: Vec3, distance: number, options?: RaycastOptions): RayHit | null {
+    const d = vec3.sub(to, from);
+    const len = vec3.length(d);
+    const skip = distance + 0.05 * METRE;
+    if (skip >= len) return null;
+    const hit = this.raycast(vec3.add(from, vec3.scale(d, skip / len)), to, options);
+    if (hit) hit.distance += skip;
+    return hit;
+  }
+
+  // ------------------------------------------------------------------------------------------- dynamic colliders
+
+  private colliders = new Map<number, DynamicBody & { model: string }>();
+  private collisionCache = new Map<string, ModelCollision | null>();
+  private stats = { colliders: 0, moved: 0, carried: 0, pushed: 0, ms: 0 };
+
+  addDynamic(model: string, matrix: ArrayLike<number>, options?: { entityId?: number }): DynamicCollider | null {
+    let collision = this.collisionCache.get(model);
+    if (collision === undefined) {
+      const bytes = this.game.level.library.bytes(model);
+      collision = null;
+      try {
+        collision = bytes ? decodeCollision(bytes) : null;
+      } catch (e) {
+        console.warn(`collision for ${model}: ${(e as Error).message}`);
+      }
+      this.collisionCache.set(model, collision);
+    }
+    if (!collision) return null;
+    const body = this.world.addBody(model, collision, matrix, options?.entityId ?? null);
+    if (!body) return null;
+    this.colliders.set(body.id, body);
+    const world = this.world;
+    const colliders = this.colliders;
+    const origin = this.game.origin;
+    return {
+      id: body.id,
+      model,
+      setMatrix: (m) => body.setMatrix(m),
+      carve: (m) => world.carve(body, m ?? body.matrix),
+      setPose: (position, rotation) => body.setMatrix(placementMatrix({ type: "", name: "", id: -1, model, position, rotation }, origin)),
+      get enabled() {
+        return body.enabled;
+      },
+      set enabled(v: boolean) {
+        if (v && !body.enabled) body.settle();
+        body.enabled = v;
+      },
+      get entityId() {
+        return body.entityId;
+      },
+      set entityId(v: number | null) {
+        body.entityId = v;
+      },
+      remove: () => {
+        world.removeBody(body);
+        colliders.delete(body.id);
+      },
+    };
+  }
+
+  dynamicStats() {
+    return { ...this.stats };
+  }
+
+  /**
+   * Once per frame, before characters move: characters standing on a collider that moved since the last frame move
+   * with it (elevators, trains, vehicles); characters the collider now overlaps are pushed along by its motion (doors
+   * swinging into them, vehicles driving into them).
+   */
+  carry() {
+    const started = performance.now();
+    const [gx, gy, gz] = this.game.origin;
+    let moved = 0;
+    let carried = 0;
+    let pushed = 0;
+    let riders: { position: Vec3; radius: number; height: number; alive: boolean }[] | null = null;
+    const done = new Set<object>();
+    const a = [0, 0, 0];
+    const b = [0, 0, 0];
+    for (const body of this.world.bodies) {
+      if (!body.enabled || !body.moved) continue;
+      moved++;
+      riders ??= this.game.entities.all().filter((e) => e.alive && e.radius > 0 && RIDERS.has(e.kind));
+      // Characters near the collider at its old or new pose.
+      const lo = [Math.min(body.box[0], body.oldBox[0]) + gx, Math.min(body.box[1], body.oldBox[1]) + gy, Math.min(body.box[2], body.oldBox[2]) + gz];
+      const hi = [Math.max(body.box[3], body.oldBox[3]) + gx, Math.max(body.box[4], body.oldBox[4]) + gy, Math.max(body.box[5], body.oldBox[5]) + gz];
+      for (const e of riders) {
+        const p = e.position;
+        const m = e.radius + 0.6 * METRE;
+        if (done.has(e) || p[0] < lo[0] - m || p[0] > hi[0] + m || p[1] < lo[1] - m || p[1] > hi[1] + m || p[2] > hi[2] + 0.5 * METRE || p[2] + e.height < lo[2]) continue;
+        // Where the point attached to the collider's old pose is now.
+        toLocal(body.carried, p[0] - gx, p[1] - gy, p[2] - gz, a);
+        toWorld(body.matrix, a[0], a[1], a[2], b);
+        if (this.world.supports(body, body.carried, p, e.radius)) {
+          e.position = [b[0] + gx, b[1] + gy, b[2] + gz];
+          done.add(e);
+          carried++;
+        } else {
+          const push = this.world.pushOut(body, p, e.radius, e.height, [b[0] + gx - p[0], b[1] + gy - p[1]]);
+          if (push) {
+            e.position = [p[0] + push[0], p[1] + push[1], p[2]];
+            done.add(e);
+            pushed++;
+          }
+        }
+      }
+      body.settle();
+    }
+    this.stats = { colliders: this.world.bodies.length, moved, carried, pushed, ms: performance.now() - started };
   }
 
   lineOfSight(from: Vec3, to: Vec3): boolean {

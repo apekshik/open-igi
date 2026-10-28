@@ -130,6 +130,11 @@ export class ModelLibrary {
     return result;
   }
 
+  /** The model's .mef bytes (level archive first), e.g. for its collision sets, or undefined. */
+  bytes(name: string): Uint8Array | undefined {
+    return this.sets.find((s) => s.models.has(name))?.models.get(name);
+  }
+
   build(name: string): BuiltModel | null {
     if (this.built.has(name)) return this.built.get(name)!;
     let result: BuiltModel | null = null;
