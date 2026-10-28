@@ -13,6 +13,7 @@ import { METRE, toThreeDir, type Vec3 } from "../coords.ts";
 import type { Game, GameSystem } from "../game.ts";
 import type { WorldService } from "./api.ts";
 import { readEnvironment, type Rgb } from "./environment.ts";
+import { gatesOpen } from "../mission/gates.ts";
 import { Splines } from "./splines.ts";
 import { clusterParts, collectStatics, loadLodTable, LodChains, type StaticNode } from "./statics.ts";
 
@@ -25,6 +26,7 @@ export function worldSystem(): GameSystem {
   let statics: StaticRenderer | null = null;
   let splines: Splines | null = null;
   let collidersAttached = false;
+  const gated: { mesh: THREE.Mesh; gates: number[] }[] = [];
   const eye = new THREE.Vector3();
 
   return {
@@ -72,12 +74,33 @@ export function worldSystem(): GameSystem {
       const chains = new LodChains(library, env, await loadLodTable(game.vfs));
       const scene = await collectStatics(game.vfs, game.level.dir, game.level.statements, game.level.objects.placements, library, game.origin);
       statics = new StaticRenderer(library, new StaticMaterials(uniforms));
-      for (const nodes of scene.clusters) if (nodes.length) statics.addCluster(clusterParts(nodes, chains));
-      for (const n of scene.loose) statics.addInstance(chains.get(n.model), n.matrix);
+      // Models inside ConditionalContainers exist only while those run (SAM sites swapped for their wrecks, props of
+      // the intro flyover, C4 that appears once planted): drawn as their own meshes and shown by gatesOpen().
+      const gatedNodes = new Map<StaticNode, number[]>();
+      for (const [placement, node] of scene.byPlacement) {
+        if (!placement.gates?.length) continue;
+        const add = (n: StaticNode) => (gatedNodes.set(n, placement.gates!), n.attachments.forEach(add));
+        add(node);
+      }
+      for (const nodes of scene.clusters) {
+        const kept = nodes.filter((n) => !gatedNodes.has(n));
+        if (kept.length) statics.addCluster(clusterParts(kept, chains));
+      }
+      for (const n of scene.loose) if (!gatedNodes.has(n)) statics.addInstance(chains.get(n.model), n.matrix);
+      for (const n of gatedNodes.keys()) statics.reserve(n.model);
       splines = new Splines(game.level.statements, library, statics, game.origin);
       statics.finish();
       splines.createTrains(library, statics);
       game.world.add(statics.group, splines.group);
+      for (const [n, gates] of gatedNodes) {
+        const mesh = statics.createMesh(n.model);
+        if (!mesh) continue;
+        mesh.matrixAutoUpdate = false;
+        mesh.matrix.copy(n.matrix);
+        mesh.visible = false;
+        statics.group.add(mesh);
+        gated.push({ mesh, gates });
+      }
 
       // Keep the per-placement meshes for collision only, with their attachments as children.
       for (const obj of game.staticObjects) {
@@ -104,6 +127,7 @@ export function worldSystem(): GameSystem {
         collidersAttached = true;
       }
       splines?.update(dt);
+      for (const g of gated) g.mesh.visible = gatesOpen(game, g.gates);
     },
 
     lateUpdate(dt, game) {

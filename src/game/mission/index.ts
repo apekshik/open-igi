@@ -110,7 +110,8 @@ export function missionSystem(): GameSystem {
       );
       cleanup.push(
         game.events.on("death", (d) => {
-          if (d.entityId === game.services.player?.entity.id && deathTimer < 0) deathTimer = DEATH_FAIL_DELAY;
+          // Only while the HumanPlayer task exists: a stray round landing during the outro must not fail a won level.
+          if (d.entityId === game.services.player?.entity.id && deathTimer < 0 && logic.playerActive()) deathTimer = DEATH_FAIL_DELAY;
         }),
       );
 

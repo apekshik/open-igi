@@ -271,7 +271,8 @@ export class MissionLogic {
       case "Game_CutsceneDelete":
         return 1;
       case "StatusMessageScreen_ClearMessages":
-        this.emit("status:clear", {});
+        // After the level ended (the outro stopping restarts the gameplay container) keep "Mission Complete!".
+        if (!this.ended) this.emit("status:clear", {});
         return 1;
       case "DefineMission":
         return 1;
@@ -416,8 +417,15 @@ export class MissionLogic {
     return this.objectives.filter((o) => o.visible);
   }
 
+  /**
+   * Only the last valid DefineComputerObjective is listed: level3 replaces its objective set twice, and its second and
+   * third sets are both valid once the flight logs are hacked (both list M3_OBJ3, which showed and completed twice).
+   */
   private updateObjectives() {
-    for (const t of this.tasks) if (t instanceof ObjectiveTask) t.update();
+    const sets = this.tasks.filter((t): t is ObjectiveTask => t instanceof ObjectiveTask);
+    let shown = -1;
+    sets.forEach((t, i) => t.valid() && (shown = i));
+    sets.forEach((t, i) => t.update(i === shown));
   }
 
   // ---- alarm
@@ -748,7 +756,7 @@ class LevelFlowTask extends LogicTask {
 }
 
 class ObjectiveTask extends LogicTask {
-  private valid = this.expr("Objectives Valid");
+  private validExpr = this.expr("Objectives Valid");
   private slots: { o: ObjectiveState; complete: Expr; failed: Expr }[] = [];
   constructor(node: TaskNode, L: MissionLogic) {
     super(node, L);
@@ -765,9 +773,12 @@ class ObjectiveTask extends LogicTask {
   field() {
     return undefined;
   }
+  /** Active, and its "Objectives Valid" expression holds (empty = always). */
+  valid() {
+    return this.active && this.test(this.validExpr, true);
+  }
   /** Runs after every tick (also while inactive, to hide the objectives). */
-  update() {
-    const visible = this.active && this.test(this.valid, true);
+  update(visible: boolean) {
     for (const s of this.slots) {
       s.o.visible = visible;
       if (!visible || s.o.state !== "active" || this.L.ended) continue;
@@ -969,10 +980,9 @@ export class DoorTask extends ObjectTask implements Usable {
   private locked = this.expr("Locked expression");
   private openExpr = this.expr("Open door expression");
   private closeExpr = this.expr("Close door expression");
+  private openWas = false;
+  private closeWas = false;
   private lastOpen = false;
-  /** Last tick's open/close expression values: doors react when an expression becomes true. */
-  private wasOpenExpr = false;
-  private wasCloseExpr = false;
 
   get destructible() {
     return false;
@@ -999,14 +1009,17 @@ export class DoorTask extends ObjectTask implements Usable {
     return super.field(name);
   }
   tick() {
-    // Edge-triggered: an elevator door's "Open door expression" (`Elevator_51.vFloor == 0`) stays true while the car
-    // waits at its floor, and a call button's close pulse must still be able to shut it.
-    const openNow = this.test(this.openExpr);
-    const closeNow = this.test(this.closeExpr);
-    if (openNow && !this.wasOpenExpr && this.open < 1) this.startMove(1);
-    else if (closeNow && !this.wasCloseExpr && this.open > 0) this.startMove(-1);
-    this.wasOpenExpr = openNow;
-    this.wasCloseExpr = closeNow;
+    // The expressions trigger on their rising edge. Elevator doors open on "Elevator_698.vFloor == 0", which stays
+    // true while the car waits; tested as a level it reopened the doors the moment a call button closed them, so the
+    // car's "Can start" (doors closed) never held and the lift never left.
+    const open = this.test(this.openExpr);
+    const close = this.test(this.closeExpr);
+    const openEdge = open && !this.openWas;
+    const closeEdge = close && !this.closeWas;
+    this.openWas = open;
+    this.closeWas = close;
+    if (openEdge && this.open < 1) this.startMove(1);
+    else if (closeEdge && this.open > 0) this.startMove(-1);
     if (this.moving !== 0) {
       this.open = Math.min(1, Math.max(0, this.open + this.moving / (this.openTime * GAME_FREQUENCY)));
       if ((this.moving > 0 && this.open >= 1) || (this.moving < 0 && this.open <= 0)) {
@@ -1293,7 +1306,8 @@ export class GenericPickupTask extends ObjectTask implements Usable {
   use(user: number | null) {
     if (this.pickedUp) return;
     this.pickedUp = true;
-    this.L.emit("pickup", { ownerId: user ?? 0, item: this.node.name || this.model, amount: 1 });
+    // By script name: the HUD leaves mission items to the level's own messages ("Keycard found!").
+    this.L.emit("pickup", { ownerId: user ?? 0, item: this.key, amount: 1 });
   }
   currentModel() {
     return this.pickedUp ? "" : this.model;
@@ -1409,12 +1423,9 @@ export class ElevatorTask extends ObjectTask {
   pos = pnum(this.node, "Pos");
   target = Math.round(this.pos);
   moving = false;
-  /**
-   * A requested floor waiting for "Can start". Calls are one-tick pulses (`Switch.isLastPressed`) that also close
-   * the doors, while "Can start" waits for the doors to be closed, so the request has to be remembered.
-   */
-  private requested = -1;
-  private speed = (pnum(this.node, "Max speed", 2) || 2) * METRE;
+  /** Floor asked for by a call button, waiting for "Can start"; -1 none. */
+  private request = -1;
+  private speed =(pnum(this.node, "Max speed", 2) || 2) * METRE;
   private canStart = this.expr("Can start");
   private wanted: Expr[] = [];
   private up = this.expr("Floor up");
@@ -1457,10 +1468,14 @@ export class ElevatorTask extends ObjectTask {
       });
       if (want < 0 && this.test(this.up)) want = Math.min(this.floors.length - 1, Math.round(this.pos) + 1);
       if (want < 0 && this.test(this.down)) want = Math.max(0, Math.round(this.pos) - 1);
-      if (want >= 0) this.requested = want !== Math.round(this.pos) ? want : -1;
-      if (this.requested >= 0 && this.test(this.canStart, true)) {
-        this.target = this.requested;
-        this.requested = -1;
+      // Call buttons pulse for one tick (Switch.isLastPressed) and close the doors at the same time, so the request
+      // is remembered until "Can start" (doors closed) holds.
+      if (want >= 0 && want !== Math.round(this.pos)) this.request = want;
+      if (this.request >= 0 && this.request === Math.round(this.pos)) this.request = -1;
+      if (this.request >= 0 && this.test(this.canStart, true)) {
+        want = this.request;
+        this.request = -1;
+        this.target = want;
         this.moving = true;
         this.L.emit("elevator", { taskId: this.node.id, moving: true, sound: pstr(this.node, "Start sound") });
       }

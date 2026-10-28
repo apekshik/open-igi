@@ -40,6 +40,8 @@ export interface StaticObjectInput {
   collision: ModelCollision;
   /** Column-major 4x4 (three.js `Matrix4.elements` layout): model space → origin-relative IGI space. */
   matrix: ArrayLike<number>;
+  /** ConditionalContainer ids the object exists under (Placement.gates); see setObjectEnabled. */
+  gates?: number[];
 }
 
 export interface WorldOptions {
@@ -161,9 +163,24 @@ export class CollisionWorld {
     this.objects = options.objects;
     this.terrain = options.terrain ? new TerrainCollider(options.terrain, options.origin, options.terrainGameMaterials, options.discards) : null;
 
-    const { soup, hitTriangles, hullTriangles, skipped } = buildSoup(options.objects, this.materials);
+    const { soup, hitTriangles, hullTriangles, skipped, ranges } = buildSoup(options.objects, this.materials);
+    this.ranges = ranges;
+    this.flags = soup.flags.slice();
     this.bvh = new TriangleBvh(soup);
     this.stats = { objects: options.objects.length - skipped, hitTriangles, hullTriangles, skipped };
+  }
+
+  /** Triangle range [start, end) of each object in the soup, and every triangle's original flags. */
+  private ranges: Uint32Array;
+  private flags: Uint8Array;
+
+  /**
+   * Take an object out of (or back into) every query, e.g. while the ConditionalContainer it sits in is not running.
+   * Its triangles stay in the BVH with their query flags cleared.
+   */
+  setObjectEnabled(index: number, enabled: boolean) {
+    const soup = this.bvh.soup.flags;
+    for (let t = this.ranges[index * 2], end = this.ranges[index * 2 + 1]; t < end; t++) soup[t] = enabled ? this.flags[t] : 0;
   }
 
   // ---------------------------------------------------------------------------------------------------- dynamic bodies
@@ -206,6 +223,7 @@ export class CollisionWorld {
       }
       if (!inside) continue;
       soup.flags[tri] = 0;
+      this.flags[tri] = 0;
       n++;
     }
     return n;
@@ -633,10 +651,13 @@ function buildSoup(objects: StaticObjectInput[], gameMaterials: GameMaterial[]) 
   const materials = new Uint16Array(total);
   const flags = new Uint8Array(total);
   const owners = new Uint32Array(total);
+  const ranges = new Uint32Array(objects.length * 2);
   let n = 0;
   let hitTriangles = 0;
   let hullTriangles = 0;
   objects.forEach((o, index) => {
+    ranges[index * 2] = n;
+    ranges[index * 2 + 1] = n;
     // Skinned models' collision is bone-relative; they are characters, not static geometry.
     if (o.collision.modelType === 1) {
       skipped++;
@@ -681,8 +702,9 @@ function buildSoup(objects: StaticObjectInput[], gameMaterials: GameMaterial[]) 
         n++;
       }
     }
+    ranges[index * 2 + 1] = n;
   });
-  return { soup: { positions, materials, flags, objects: owners }, hitTriangles, hullTriangles, skipped };
+  return { soup: { positions, materials, flags, objects: owners }, hitTriangles, hullTriangles, skipped, ranges };
 }
 
 /**
