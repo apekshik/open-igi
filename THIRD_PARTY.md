@@ -112,3 +112,14 @@ The same project's task-system and level-system notes (`reverse/docs/11-task-sys
 the `language/*.res` files and `LevelFlow_GetBreakCutSceneKey` among the script natives) guided the mission system in
 `src/game/mission/`. The value of `GAME_FREQUENCY` (30) was read from IGI.exe's script constant table by us; the
 remaining task semantics come from reading the levels' own objects.qvm scripts. See `docs/formats/mission.md`.
+
+## World rendering: sky, fog and level of detail
+
+The sky and fog in `src/render/sky.ts` and `src/game/world/environment.ts` follow hjcminus/Project-IGI-Terrain (MIT,
+licence above): the sky dome's shape and colour interpolation (`source/renderer/renderer_skydome.cpp`), the flat cloud
+layers' plane, UV mapping and distance fade (`source/level/flat_sky_layer.cpp`), which `FlatSky`, `FlatSkyLayer` and
+`GlobalLightKeyframe` parameters feed them (`source/level/level.cpp`), and its mapping of fog density to fog distance.
+
+flawme/igi-reverse-engineering (MIT) identified `pc/lod.qvm` as the per-model LOD table (`reverse/docs/14-lod-system`),
+which `src/game/world/statics.ts` reads. The `.olm` lightmap layout, the lightmap-to-model order, `LTMP` and `ATTA` are
+our own reading of the data (`docs/formats/world.md`).

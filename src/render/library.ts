@@ -5,6 +5,7 @@ import { parseAnimFile, poseBones, type AnimFile } from "../formats/anim.ts";
 import { readRes } from "../formats/ilff.ts";
 import { decodeMef, skinFitError, skinMef, type MefModel } from "../formats/mef.ts";
 import { parseMtp, type MaterialTable } from "../formats/mtp.ts";
+import { readMefLighting, type MefLighting } from "../formats/olm.ts";
 import { decodeTex } from "../formats/tex.ts";
 import type { Vfs } from "../vfs/vfs.ts";
 
@@ -54,6 +55,25 @@ export function fitSkeleton(model: MefModel, files: AnimFile[]): { anims: AnimFi
   return scored.find((s) => s.fitError <= best + 1)!;
 }
 
+/** How a texture's alpha channel is used: none, a 1-bit cut-out, or soft (blended) edges. */
+export type TextureAlpha = "opaque" | "mask" | "blend";
+
+export const textureAlpha = (t: THREE.Texture | null): TextureAlpha => (t?.userData.alpha as TextureAlpha | undefined) ?? "opaque";
+
+function classifyAlpha(rgba: Uint8Array): TextureAlpha {
+  let holes = 0;
+  let soft = 0;
+  for (let i = 3; i < rgba.length; i += 4) {
+    const a = rgba[i];
+    if (a === 0) holes++;
+    else if (a !== 255) soft++;
+  }
+  const pixels = rgba.length / 4;
+  // A few soft texels are edge noise in otherwise cut-out art; treat a texture as blended once they matter.
+  if (soft > pixels * 0.02) return "blend";
+  return holes || soft ? "mask" : "opaque";
+}
+
 const baseName = (path: string) => path.split("/").pop()!.replace(/\.\w+$/, "");
 
 async function archive(vfs: Vfs, path: string) {
@@ -80,6 +100,7 @@ export async function levelLibrary(vfs: Vfs, level: string): Promise<ModelLibrar
 export class ModelLibrary {
   private built = new Map<string, BuiltModel | null>();
   private textures = new Map<string, THREE.Texture | null>();
+  private lightings = new Map<string, MefLighting | null>();
   wireframe = false;
   private sets: ModelSet[];
   /** Skeletons and animations from common/anims, for posing type 1 (skinned) models. */
@@ -93,6 +114,20 @@ export class ModelLibrary {
   /** Model names of the first (level) set, in material-table order. */
   get levelModels(): string[] {
     return this.sets[0]?.mtp.models ?? [];
+  }
+
+  /** True if any set has this model. */
+  has(name: string): boolean {
+    return this.sets.some((s) => s.models.has(name) && s.modelIndex.has(name));
+  }
+
+  /** Lightmap layout (LTMP, second UV set) and attachments (ATTA) of a model, or null if it is not in the library. */
+  lighting(name: string): MefLighting | null {
+    if (this.lightings.has(name)) return this.lightings.get(name)!;
+    const bytes = this.sets.find((s) => s.models.has(name))?.models.get(name);
+    const result = bytes ? readMefLighting(bytes) : null;
+    this.lightings.set(name, result);
+    return result;
   }
 
   build(name: string): BuiltModel | null {
@@ -134,12 +169,17 @@ export class ModelLibrary {
       const texName = b.material === NO_MATERIAL ? undefined : set.mtp.textures[slots[b.material]];
       const map = texName ? this.texture(texName) : null;
       textureNames.push(`${b.material}→${texName ?? "-"}`);
+      // ARGB1555 alpha is a cut-out mask (fences, foliage); only 32-bit textures with soft alpha are blended.
+      const alpha = textureAlpha(map);
       materials.push(
         new THREE.MeshLambertMaterial({
           map,
           color: map ? 0xffffff : 0x999999,
           side: THREE.DoubleSide,
-          alphaTest: 0.5,
+          alphaTest: alpha === "blend" ? 0.02 : alpha === "mask" ? 0.5 : 0,
+          alphaToCoverage: alpha === "mask",
+          transparent: alpha === "blend",
+          depthWrite: alpha !== "blend",
           wireframe: this.wireframe,
         }),
       );
@@ -166,6 +206,7 @@ export class ModelLibrary {
       t.generateMipmaps = true;
       t.anisotropy = 8;
       t.colorSpace = THREE.SRGBColorSpace;
+      t.userData.alpha = classifyAlpha(tex.rgba);
       t.needsUpdate = true;
     }
     this.textures.set(name, t);

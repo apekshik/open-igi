@@ -1,17 +1,132 @@
-// STUB world: flat background colour and fog. The world system replaces it with IGI's sky layers, sun/ambient light
-// from GlobalLight, building lightmaps (.olm), model LODs and moving scenery.
+// World system: IGI's sky (dome + cloud layers), sun, ambient light and fog from the level's EnvironmentalEffects
+// tasks, and the static world drawn the way the original lights it (baked .olm lightmaps on buildings, the sun on
+// everything else) with model LODs, merged buildings and instanced props.
+//
+// Game.load() places every static model as its own mesh in Game.staticObjects (other systems raycast them). This system
+// keeps those meshes for collision but hides them, gives them their attached sub-models (rooms, lamps) as invisible
+// children, and draws the world with StaticRenderer instead.
 import * as THREE from "three";
-import { METRE } from "../coords.ts";
-import type { GameSystem } from "../game.ts";
+import { decodeTex } from "../../formats/tex.ts";
+import { SkyRenderer } from "../../render/sky.ts";
+import { createStaticUniforms, StaticMaterials, StaticRenderer } from "../../render/statics.ts";
+import { METRE, toThreeDir, type Vec3 } from "../coords.ts";
+import type { Game, GameSystem } from "../game.ts";
+import type { WorldService } from "./api.ts";
+import { readEnvironment, type Rgb } from "./environment.ts";
+import { Splines } from "./splines.ts";
+import { clusterParts, collectStatics, loadLodTable, LodChains, type StaticNode } from "./statics.ts";
+
+const hex = (c: Rgb) => (to8(c[0]) << 16) | (to8(c[1]) << 8) | to8(c[2]);
+const to8 = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255);
+const clamp01 = (c: Rgb): Rgb => c.map((v) => Math.min(1, Math.max(0, v))) as Rgb;
 
 export function worldSystem(): GameSystem {
+  let sky: SkyRenderer | null = null;
+  let statics: StaticRenderer | null = null;
+  let splines: Splines | null = null;
+  const eye = new THREE.Vector3();
+
   return {
     name: "world",
-    init(game) {
-      const fog = { color: 0x9aa7b4, near: 300 * METRE, far: 4000 * METRE };
-      game.scene.background = new THREE.Color(fog.color);
-      game.scene.fog = new THREE.Fog(fog.color, fog.near, fog.far);
-      game.services.world = { fog };
+    async init(game) {
+      const env = readEnvironment(game.level.statements);
+      const fog = { color: hex(env.fog.color), near: env.fog.near, far: env.fog.far };
+      const raw = (c: Rgb) => new THREE.Color().setRGB(...clamp01(c), THREE.SRGBColorSpace);
+      game.scene.background = raw(env.sky.fogColor);
+      game.scene.fog = new THREE.Fog(raw(env.fog.color), fog.near, fog.far);
+
+      // three.js-lit materials (characters, pickups): the sun's front colour plus the back colour as ambient.
+      const sunDir = toThreeDir(env.sun.direction).normalize();
+      for (const light of game.scene.children) {
+        if (light instanceof THREE.HemisphereLight) {
+          light.color.copy(raw(env.sun.back));
+          light.groundColor.copy(raw(env.sun.back)).multiplyScalar(0.6);
+          light.intensity = 1;
+        } else if (light instanceof THREE.DirectionalLight) {
+          light.color.copy(raw(env.sun.front));
+          light.intensity = 1;
+          light.position.copy(sunDir);
+        }
+      }
+
+      // Sky.
+      const layers = [];
+      for (const l of env.sky.layers) {
+        const path = l.texture.replaceAll("\\", "/");
+        if (!game.vfs.has(path)) continue;
+        layers.push({ ...l, texture: decodeTex(await game.vfs.read(path)) });
+      }
+      sky = new SkyRenderer({ metre: METRE, ...env.sky, layers });
+      game.scene.add(sky.group);
+
+      // Static world.
+      const uniforms = createStaticUniforms();
+      uniforms.fogColor.value.set(...clamp01(env.fog.color));
+      uniforms.fogNear.value = fog.near;
+      uniforms.fogFar.value = fog.far;
+      uniforms.sunDir.value.copy(sunDir);
+      uniforms.sunFront.value.set(...env.sun.front);
+      uniforms.sunBack.value.set(...env.sun.back);
+      const library = game.level.library;
+      const chains = new LodChains(library, env, await loadLodTable(game.vfs));
+      const scene = await collectStatics(game.vfs, game.level.dir, game.level.statements, game.level.objects.placements, library, game.origin);
+      statics = new StaticRenderer(library, new StaticMaterials(uniforms));
+      for (const nodes of scene.clusters) if (nodes.length) statics.addCluster(clusterParts(nodes, chains));
+      for (const n of scene.loose) statics.addInstance(chains.get(n.model), n.matrix);
+      splines = new Splines(game.level.statements, library, statics, game.origin);
+      statics.finish();
+      splines.createTrains(library, statics);
+      game.world.add(statics.group, splines.group);
+
+      // Keep the per-placement meshes for collision only, with their attachments as children.
+      for (const obj of game.staticObjects) {
+        obj.visible = false;
+        const node = scene.byPlacement.get(obj.userData.placement);
+        if (node) addCollisionChildren(game, obj, node);
+      }
+
+      const renderer = statics;
+      const trains = splines;
+      const service: WorldService = {
+        fog,
+        sun: { direction: env.sun.direction as Vec3, front: env.sun.front, back: env.sun.back },
+        stats: () => ({ ...renderer.stats(), ...scene.lightMapStats }),
+        train: (id) => trains.train(id),
+      };
+      game.services.world = service;
+    },
+
+    update(dt) {
+      splines?.update(dt);
+    },
+
+    lateUpdate(dt, game) {
+      sky?.update(dt, game.camera.position);
+      if (statics) {
+        const p = game.fromScene(game.camera.position);
+        statics.update(eye.set(p[0] - game.origin[0], p[1] - game.origin[1], p[2] - game.origin[2]));
+      }
     },
   };
+}
+
+/** Attachments as invisible children of their placement's mesh, so raycasts against staticObjects hit them. */
+function addCollisionChildren(game: Game, obj: THREE.Object3D, node: StaticNode) {
+  obj.updateMatrix();
+  const inverse = obj.matrix.clone().invert();
+  const add = (n: StaticNode) => {
+    for (const a of n.attachments) {
+      const built = game.level.library.build(a.model);
+      if (built) {
+        const child = new THREE.Mesh(built.geometry, built.materials);
+        child.matrixAutoUpdate = false;
+        child.matrix.multiplyMatrices(inverse, a.matrix);
+        child.userData.attachment = a.model;
+        obj.add(child);
+      }
+      add(a);
+    }
+  };
+  add(node);
+  obj.updateMatrixWorld(true);
 }

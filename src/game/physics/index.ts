@@ -1,6 +1,7 @@
 // Physics: IGI's own collision data. Static models collide with their .mef collision sets (the material-tagged "hit"
 // shape for rays, the pre-grown "human" hull for movement), terrain with the octree's leaf meshes at full detail,
 // entities with vertical capsules. See load.ts / world.ts and docs/formats/collision.md.
+import * as THREE from "three";
 import { METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Game, GameSystem } from "../game.ts";
 import type { Placement } from "../../level/objects.ts";
@@ -19,6 +20,15 @@ export function physicsSystem(): GameSystem {
         if (!placement) continue;
         object.updateMatrix();
         placed.push({ placement, matrix: object.matrix.elements });
+        // Attached sub-models (building interiors, fittings) that the world system adds as children: they carry their
+        // own collision sets.
+        object.traverse((child) => {
+          const model = child.userData.attachment as string | undefined;
+          if (!model || child === object) return;
+          const matrix = new THREE.Matrix4();
+          for (let n: THREE.Object3D | null = child; n && n !== object.parent; n = n.parent) matrix.premultiply(n.matrix);
+          placed.push({ placement: { ...placement, model }, matrix: matrix.elements });
+        });
       }
       const world = await buildCollisionWorld(game.vfs, game.level, game.origin, placed);
       // Terrain columns around the start, so the first shots and steps don't pay for building them.
