@@ -3,6 +3,7 @@
 // direction, pickup notices, context action icons and progress bar, the binocular/scope overlay, and the map computer.
 import { direction, METRE, vec3, type Vec3 } from "../coords.ts";
 import type { Game, GameSystem } from "../game.ts";
+import { keyName } from "../input.ts";
 import type { HudAction, HudService, ZoomMode } from "./api.ts";
 import { UiAssets, type Sprite, type UiFont } from "./gfx.ts";
 import { MapComputer, NORTH_YAW } from "./map.ts";
@@ -436,7 +437,10 @@ class Hud {
     const y = Math.round(H / 2 + 24);
     if (icon) this.ctx.drawImage(icon.frames[0], Math.round(W / 2 - icon.width / 2), y);
     const text = this.currentAction ? ACTION_TEXT[this.currentAction] : prompt?.text;
-    if (text) this.font4.draw(this.ctx, text, W / 2, y + (icon?.height ?? 0) + 4, { color: HUD_GREEN, align: "center" });
+    // IGI leaves the use key to the manual; open-igi names it, as bound in Controls, so first-time players know.
+    const key = this.game.input.bindings.use[0];
+    const label = key && text ? `${keyName(key)} - ${text}` : text;
+    if (label) this.font4.draw(this.ctx, label, W / 2, y + (icon?.height ?? 0) + 4, { color: HUD_GREEN, align: "center" });
   }
 
   private drawProgress(W: number, H: number) {
