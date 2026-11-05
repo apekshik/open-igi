@@ -105,3 +105,6 @@ textiles, rugs, snow and glass. A crouched player raises no footstep noise (*exe
 - Lean on Q/E with a 10° camera roll (IGI leans with Peek + strafe and only shifts the eye). The eye stops 0.25 m
   short of walls. As in IGI the player does not move while leaning.
 - Ladders: the jump-off push (2 m/s back, 1 m/s up) and the 10 m radius soldiers hear ladder steps in are ours.
+- Ladders: holding crouch slides down at 4x the climb rate, without step sounds (IGI 1 has no slide). The climb
+  icon shows from 2.5 m out at a ladder's foot, since walking in grabs the ladder the moment it is in reach.
+- The HUD names the use key under the context icon ("F - Use computer"); IGI left it to the manual.

@@ -20,6 +20,13 @@ const PART_BONES = [52, 55];
 const VIEW_ORDER = 1_000_000;
 /** Self-light of the view model as a fraction of its texture colour (see viewMaterial). */
 const VIEW_SELF_LIGHT = 0.4;
+/**
+ * The view model is drawn this many times its size, scaled about the eye: the picture is the same (perspective is
+ * unchanged by scaling about the eye), but the stock and scope that reach back past the camera's 5 cm near plane
+ * no longer get sliced open by it (seen inside-out on wide screens, where the fixed horizontal FOV brings them in).
+ */
+const VIEW_SCALE = 8;
+const SCALE_MATRIX = new THREE.Matrix4().makeScale(VIEW_SCALE, VIEW_SCALE, VIEW_SCALE);
 const BLEND_TIME = 0.12;
 
 /** An attachment point in a .mef (ATTA chunk): 68-byte records of name[16], vec3 position, 3x3 rotation, pad. */
@@ -304,14 +311,16 @@ export class ViewModel {
     const f = this.flashes[0];
     if (f && !this.hidden && this.lowered < 0.5) {
       f.updateWorldMatrix(true, false);
-      return out.setFromMatrixPosition(f.matrixWorld);
+      // Undo VIEW_SCALE: the flash is drawn VIEW_SCALE times further from the eye than the muzzle it stands for.
+      const eye = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+      return out.setFromMatrixPosition(f.matrixWorld).sub(eye).divideScalar(VIEW_SCALE).add(eye);
     }
     // About 30 cm ahead, 10 cm right and down of the eye.
     return out.set(0.1, -0.1, -0.3).multiplyScalar(4096).applyMatrix4(camera.matrixWorld);
   }
 
   update(dt: number, camera: THREE.Camera, input: ViewModelInput) {
-    this.root.matrix.copy(camera.matrixWorld);
+    this.root.matrix.copy(camera.matrixWorld).multiply(SCALE_MATRIX);
     this.root.matrixWorldNeedsUpdate = true;
     this.root.visible = !this.hidden && !!this.weapon && this.lowered < 0.999;
 

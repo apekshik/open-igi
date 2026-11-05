@@ -36,6 +36,8 @@ type Dir = keyof typeof MOVE_CLIPS.run;
 // climbs over the top: 1.84 m up and 0.77 m forward over 2.33 s, ending stood 2.45 m above its origin.
 /** Grab a ladder from this far out (feet to rungs; a ladder's movement hull stands 0.76 m proud of its rungs). */
 const LADDER_REACH = 1.3 * METRE;
+/** Show the climb icon from this far out at a ladder's foot, before it is in reach (walking in grabs it at once). */
+const LADDER_HINT = 2.5 * METRE;
 /** Sideways slack beyond the rails when grabbing. */
 const LADDER_SLACK = 0.3 * METRE;
 /** Height of the planted foot's rung above clip 168's origin, and the top of the hands at the end of a cycle. */
@@ -47,6 +49,8 @@ const LADDER_CLEAR = 1.2 * METRE;
 const LADDER_GRAB_TIME = 0.25;
 /** Push off when jumping from a ladder (m/s back, up). open-igi's choice. */
 const LADDER_JUMP = { back: 2 * METRE, up: 1 * METRE };
+/** Holding crouch on a ladder slides down it at this many times the climb rate. open-igi's choice (IGI 1 has none). */
+const LADDER_SLIDE = 4;
 /** AI hears ladder steps (AIEVENT_LADDER) within this radius. open-igi's choice: IGI's value is not known. */
 const LADDER_NOISE = 10 * METRE;
 const LADDER_SOUNDS = ["walk_ladder_1", "walk_ladder_2", "walk_ladder_3", "walk_ladder_4"];
@@ -304,11 +308,11 @@ class Player implements PlayerService {
     let grab: ReturnType<Player["ladderInReach"]> = null;
     if (!this.climbing && this.grounded && !leaning && this.stance === "stand") {
       grab = this.ladderInReach(fwd);
-      if (grab && (grab.moving || input.wasPressed("use"))) this.mountLadder(grab.ladder, grab.top);
+      if (grab?.reach && (grab.moving || input.wasPressed("use"))) this.mountLadder(grab.ladder, grab.top);
     }
     this.game.services.hud?.action(grab && !this.climbing ? "ladder" : null);
 
-    if (this.climbing) this.updateLadder(dt, fwd, input.wasPressed("jump"));
+    if (this.climbing) this.updateLadder(dt, fwd, input.wasPressed("jump"), input.isDown("crouch"));
     else if (this.grounded) this.updateGround(dt, leaning ? 0 : fwd, leaning ? 0 : side, input.isDown("walk"), input.wasPressed("jump"));
     else this.updateAir(dt, fwd, side);
 
@@ -451,23 +455,24 @@ class Player implements PlayerService {
 
   /**
    * The ladder Jones could get on from where he stands: at its foot, facing it (`moving` when walking into it), or on
-   * its landing at the top, by its hooks (`moving` when walking out over the edge).
+   * its landing at the top, by its hooks (`moving` when walking out over the edge). At the foot it is also returned
+   * from a little further out, with `reach` false, so the icon shows before walking in grabs it.
    */
-  private ladderInReach(fwd: number): { ladder: Ladder; top: boolean; moving: boolean } | null {
+  private ladderInReach(fwd: number): { ladder: Ladder; top: boolean; moving: boolean; reach: boolean } | null {
     const feet = this.entity.position;
     const look = direction(this.yaw);
     for (const l of this.ladders) {
       const f = this.ladderFrame(l, feet);
       if (Math.abs(f.side) > l.halfWidth + LADDER_SLACK) continue;
       const facing = look[0] * l.face[0] + look[1] * l.face[1];
-      if (f.out > 0 && f.out <= LADDER_REACH && f.up > l.bottom - 0.6 * METRE && f.up < l.rungTop - 1.8 * METRE && facing > 0.5) {
-        return { ladder: l, top: false, moving: fwd > 0 };
+      if (f.out > 0 && f.out <= LADDER_HINT && f.up > l.bottom - 0.6 * METRE && f.up < l.rungTop - 1.8 * METRE && facing > 0.5) {
+        return { ladder: l, top: false, moving: fwd > 0, reach: f.out <= LADDER_REACH };
       }
       const landing = this.landing(l);
       if (landing !== null && feet[2] > landing - METRE && feet[2] < landing + 0.5 * METRE && f.out < 0 && f.out > -LADDER_REACH) {
         // Walking towards the edge: forward facing away from the wall, or backing onto it facing the wall.
         if (Math.abs(facing) < 0.5) continue;
-        return { ladder: l, top: true, moving: fwd !== 0 && Math.sign(fwd) === -Math.sign(facing) };
+        return { ladder: l, top: true, moving: fwd !== 0 && Math.sign(fwd) === -Math.sign(facing), reach: true };
       }
     }
     return null;
@@ -545,7 +550,7 @@ class Player implements PlayerService {
    * IGI's ladder: forward climbs, back climbs down, nothing else moves Jones (strafe and look leave him on the rungs);
    * he gets off at the top (clip 170 onto the landing), at the foot (on the ground), or by jumping.
    */
-  private updateLadder(dt: number, fwd: number, jump: boolean) {
+  private updateLadder(dt: number, fwd: number, jump: boolean, slide: boolean) {
     const c = this.climb!;
     const l = c.ladder;
     this.gait = "ladder";
@@ -586,8 +591,8 @@ class Player implements PlayerService {
         } else c.t = length;
       }
       if (c.clip === CLIP.ladder) crossed = steps.some((s) => (c.t >= before ? s > before && s <= c.t : s > before || s <= c.t));
-    } else if (fwd < 0) {
-      c.t -= rate;
+    } else if (fwd < 0 || slide) {
+      c.t -= slide ? rate * LADDER_SLIDE : rate;
       if (c.t < 0) {
         const below = this.ladderPoint(l, 0, -0.4 * METRE, c.base);
         const ground = this.physics?.groundHeight(below[0], below[1], below[2] + 1.5 * METRE) ?? null;
@@ -598,7 +603,8 @@ class Player implements PlayerService {
           c.base = next;
         } else return this.leaveLadder("bottom", false);
       }
-      crossed = steps.some((s) => (c.t <= before ? s < before && s >= c.t : s < before || s >= c.t));
+      // Sliding, the hands and feet stay off the rungs: no steps.
+      crossed = !slide && steps.some((s) => (c.t <= before ? s < before && s >= c.t : s < before || s >= c.t));
     }
     if (crossed) this.ladderStep();
     this.clips?.seek(Math.min(c.t, this.clipLength(c.clip) - 1));

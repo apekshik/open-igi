@@ -62,6 +62,42 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   weapon9: ["Digit9"],
 };
 
+const NAMED: Record<string, string> = {
+  Space: "Space bar",
+  Enter: "Return",
+  Backspace: "Backspace",
+  Tab: "Tab",
+  Escape: "Esc",
+  ShiftLeft: "Left Shift",
+  ShiftRight: "Right Shift",
+  ControlLeft: "Left Control",
+  ControlRight: "Right Control",
+  AltLeft: "Left Alt",
+  AltRight: "Right Alt",
+  ArrowUp: "Arrow Up",
+  ArrowDown: "Arrow Down",
+  ArrowLeft: "Arrow Left",
+  ArrowRight: "Arrow Right",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Mouse0: "Left Mousebutton",
+  Mouse1: "Middle Mousebutton",
+  Mouse2: "Right Mousebutton",
+  Mouse3: "Mousebutton 4",
+  Mouse4: "Mousebutton 5",
+  WheelUp: "Wheel Up",
+  WheelDown: "Wheel Down",
+};
+
+/** Human name for a KeyboardEvent.code / Input binding code. */
+export function keyName(code: string): string {
+  if (NAMED[code]) return NAMED[code];
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit\d$/.test(code)) return code.slice(5);
+  if (/^Numpad\d$/.test(code)) return `Numpad ${code.slice(6)}`;
+  return code.replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
 export class Input {
   bindings: Record<Action, string[]> = structuredClone(DEFAULT_BINDINGS);
   /** Mouse sensitivity in radians per pixel. */

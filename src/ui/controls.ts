@@ -1,7 +1,9 @@
 // The key-binding list of the Controls screen (IGI's ControlsMenu): one row per action with its key; click a row,
 // then press a key, mouse button or turn the wheel to rebind it.
-import type { Action } from "../game/input.ts";
+import { keyName, type Action } from "../game/input.ts";
 import { COLORS, drawThinFrame, Widget, type MenuCanvas, type MenuTheme, type Rect } from "./menu.ts";
+
+export { keyName };
 
 /** Actions in the order the Controls screen lists them, with the language-file key for the label when IGI has one. */
 export const ACTION_LABELS: [Action, string, string][] = [
@@ -30,42 +32,6 @@ export const ACTION_LABELS: [Action, string, string][] = [
   ["map", "MapComputer", "Mapcomputer"],
   ["pause", "", "Pause Menu"],
 ];
-
-const NAMED: Record<string, string> = {
-  Space: "Space bar",
-  Enter: "Return",
-  Backspace: "Backspace",
-  Tab: "Tab",
-  Escape: "Esc",
-  ShiftLeft: "Left Shift",
-  ShiftRight: "Right Shift",
-  ControlLeft: "Left Control",
-  ControlRight: "Right Control",
-  AltLeft: "Left Alt",
-  AltRight: "Right Alt",
-  ArrowUp: "Arrow Up",
-  ArrowDown: "Arrow Down",
-  ArrowLeft: "Arrow Left",
-  ArrowRight: "Arrow Right",
-  BracketLeft: "[",
-  BracketRight: "]",
-  Mouse0: "Left Mousebutton",
-  Mouse1: "Middle Mousebutton",
-  Mouse2: "Right Mousebutton",
-  Mouse3: "Mousebutton 4",
-  Mouse4: "Mousebutton 5",
-  WheelUp: "Wheel Up",
-  WheelDown: "Wheel Down",
-};
-
-/** Human name for a KeyboardEvent.code / Input binding code. */
-export function keyName(code: string): string {
-  if (NAMED[code]) return NAMED[code];
-  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
-  if (/^Digit\d$/.test(code)) return code.slice(5);
-  if (/^Numpad\d$/.test(code)) return `Numpad ${code.slice(6)}`;
-  return code.replace(/([a-z])([A-Z])/g, "$1 $2");
-}
 
 export class KeyBindings extends Widget {
   private offset = 0;

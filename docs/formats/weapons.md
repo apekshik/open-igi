@@ -78,6 +78,10 @@ Weapon animation ids (`StandAnim`, `MoveAnim`, `FireAnim1-3`, `ReloadAnim`) inde
 ticks per second** (keys every 160 ticks = 30 fps; the AK47 reload is 14240 ticks = 2.97 s, the stand loop ~2 s).
 The Spas 12's reload animation (0.63 s) loads one shell.
 
+open-igi draws the arms and gun 8x their size, scaled about the eye (the same picture): stocks and scopes reach
+back past the camera's 5 cm near plane, which otherwise slices them open (the Dragunov's scope, seen inside-out on
+wide screens, where the fixed horizontal FOV brings it into view).
+
 ## .spr sprite (partial)
 
 `"LOOP"`, u32 9, ..., u32 @40 width, @44 height, @48 format (3 = BGRA8888, 2 = ARGB1555); single-frame pixels start
