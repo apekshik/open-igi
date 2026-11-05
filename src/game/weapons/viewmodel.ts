@@ -387,7 +387,12 @@ function depthClearer(): THREE.Object3D {
   const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false, colorWrite: false }));
   m.frustumCulled = false;
   m.renderOrder = VIEW_ORDER - 1;
-  m.onBeforeRender = (renderer) => renderer.clearDepth();
+  // clearDepth() leaves the depth mask as the last draw set it, and a depthWrite: false draw (smoke, decals) would
+  // turn the clear into a no-op, so the world would hide the gun.
+  m.onBeforeRender = (renderer) => {
+    renderer.state.buffers.depth.setMask(true);
+    renderer.clearDepth();
+  };
   return m;
 }
 
