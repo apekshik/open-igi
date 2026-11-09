@@ -156,7 +156,8 @@ export class FrontEnd {
     await this.assets.preload(MISSION_RES);
     const pictures = await Promise.all(this.missions.map((m) => this.assets.sprite(MISSION_RES, `mission${m.number}.spr`)));
     const unlocked = this.unlocked();
-    let selected = Math.min(unlocked, this.missions.length) - 1;
+    // Every mission is open; the cursor starts on the furthest one the player has reached.
+    let selected = Math.min(missionsUnlocked(), this.missions.length) - 1;
     const picture = new Picture({ x: 140, y: 210, w: 172, h: 128 }, pictures[selected]);
     const text = new TextBlock({ x: 142, y: 344, w: 168, h: 90 }, this.missions[selected].description, "font4");
     const go = (i: number) => this.load(this.missions[i]);
@@ -189,9 +190,12 @@ export class FrontEnd {
     });
   }
 
-  /** Highest mission number selectable: progress, or everything with ?missions=all. */
+  /**
+   * Highest mission number selectable. A preservation build opens every mission; ?missions=progress restores IGI's
+   * unlock-in-order rule.
+   */
   private unlocked() {
-    return new URLSearchParams(location.search).get("missions") === "all" ? 14 : missionsUnlocked();
+    return new URLSearchParams(location.search).get("missions") === "progress" ? missionsUnlocked() : 14;
   }
 
   /** OK / Cancel stacked at the right of the panel (MenuFrame "OK/Cancel" at 555,400 / 470,360). */

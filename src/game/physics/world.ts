@@ -431,16 +431,33 @@ export class CollisionWorld {
           let hy = py - closest[1];
           let depth = r - d;
           const hl = Math.hypot(hx, hy);
-          if (hl < 1e-6 || (hx * nx + hy * ny) * side < 0) {
+          const nh = Math.hypot(nx, ny) || 1;
+          const along = (hx * nx + hy * ny) / nh; // signed horizontal distance from the face's plane
+          // Through the plane only counts when the closest point is inside the face (h along its normal). Past the end
+          // of a face (rounding a building's corner, a door frame) the centre is beyond the plane but beside the face,
+          // and the closest point is on its edge: push away from the edge, not back through to the "original" side,
+          // which threw the body back a radius every other frame and made it jitter at every outside corner.
+          if (hl < 1e-6 || (along * side < 0 && Math.abs(along) > 0.98 * hl)) {
             // On or through the plane: go back out along the face normal, to the original side.
-            const nl = Math.hypot(nx, ny) || 1;
             const sgn = side >= 0 ? 1 : -1;
-            hx = (nx / nl) * sgn;
-            hy = (ny / nl) * sgn;
+            hx = (nx / nh) * sgn;
+            hy = (ny / nh) * sgn;
             depth = r + d;
           } else {
             hx /= hl;
             hy /= hl;
+            if (along * side < 0) {
+              // Beside the face's edge but behind its plane: slide off the edge along the plane, never further behind
+              // it (pushing straight away from the edge would walk the body round behind thin faces into gaps).
+              const k = (hx * nx + hy * ny) / (nh * nh);
+              hx -= k * nx;
+              hy -= k * ny;
+              const l = Math.hypot(hx, hy);
+              if (l > 1e-6) {
+                hx /= l;
+                hy /= l;
+              }
+            }
           }
           px += hx * (depth + 0.5);
           py += hy * (depth + 0.5);
