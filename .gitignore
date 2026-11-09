@@ -24,3 +24,4 @@ out/
 .env.local
 .vercel
 .env*
+.wrangler/
