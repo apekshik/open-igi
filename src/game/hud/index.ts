@@ -70,7 +70,7 @@ const ACTION_SPRITES: Record<HudAction, string> = {
 };
 
 /** Prompt text for actions the HUD is told about directly. */
-const ACTION_TEXT: Partial<Record<HudAction, string>> = { ladder: "Climb ladder" };
+const ACTION_TEXT: Partial<Record<HudAction, string>> = { ladder: "Climb ladder", fence: "Climb fence" };
 
 /** The icon for a mission use prompt (the texts of src/game/mission/logic.ts's Usable tasks). */
 function promptAction(text: string): HudAction {

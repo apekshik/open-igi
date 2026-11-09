@@ -1,6 +1,6 @@
 // ?view=play: the game with IGI's front end (main menu, mission select, options, loading screen, pause and end
 // screens; see src/ui/app.ts). ?level=levelN skips the menus and starts that mission directly; ?detail=N overrides
-// the terrain detail; ?missions=all unlocks every mission in the mission select.
+// the terrain detail. Every mission is open in the mission select; ?missions=progress restores unlock-in-order.
 import { FrontEnd } from "../ui/app.ts";
 import type { Vfs } from "../vfs/vfs.ts";
 

@@ -10,6 +10,7 @@ import type { Entity } from "../entity.ts";
 import type { Game, GameSystem } from "../game.ts";
 import type { QvmCall, QvmValue } from "../../formats/qvm.ts";
 import { ANIM_TICKS_PER_SECOND, ClipPlayer, rootAt } from "./animator.ts";
+import { findFences, type Fence } from "./fences.ts";
 import { findLadders, type Ladder } from "./ladders.ts";
 import type { Gait, PlayerService, Stance } from "./api.ts";
 import { SkinnedBody } from "./body.ts";
@@ -27,7 +28,7 @@ const MOVE_CLIPS = {
   walk: { f: 57, fr: 74, fl: 72, b: 75, br: 77, bl: 76, r: 81, l: 80 },
   crouch: { f: 17, fr: 41, fl: 39, b: 27, br: 49, bl: 47, r: 29, l: 28 },
 };
-const CLIP = { stand: 2, crouched: 19, jump: 25, fall: 2, ladder: 168, ladderTop: 170, death: [201, 202], deathHead: 204 };
+const CLIP = { stand: 2, crouched: 19, jump: 25, fall: 2, ladder: 168, ladderTop: 170, fence: 171, death: [201, 202], deathHead: 204 };
 type Dir = keyof typeof MOVE_CLIPS.run;
 
 // Ladders (see ladders.ts and docs/formats/player.md). Clip 168 is laid out with its origin on the rung plane and on
@@ -54,6 +55,32 @@ const LADDER_SLIDE = 4;
 /** AI hears ladder steps (AIEVENT_LADDER) within this radius. open-igi's choice: IGI's value is not known. */
 const LADDER_NOISE = 10 * METRE;
 const LADDER_SOUNDS = ["walk_ladder_1", "walk_ladder_2", "walk_ladder_3", "walk_ladder_4"];
+
+// Fences (see fences.ts). Clip 171 is laid out with its origin on the ground at the start, facing the panel, with the
+// pelvis FENCE_START out from it: the hands then meet the wire while the pelvis hangs 0.35-0.4 m off it, and the clip
+// ends with the feet 0.89 m past it.
+/** Climb a fence from this far out (feet to panel) when facing it and pressing use or jump. */
+const FENCE_REACH = 1.2 * METRE;
+/** Keep the climb this far in from the panel's ends. */
+const FENCE_MARGIN = 0.4 * METRE;
+/** Out from the panel where clip 171's origin (the starting pelvis) is laid. */
+const FENCE_START = 0.6 * METRE;
+/** Seconds over which the body slides from where it stood onto the climb's start. */
+const FENCE_GRAB_TIME = 0.25;
+
+interface FenceClimb {
+  fence: Fence;
+  /** Horizontal unit vector Jones faces (into the panel). */
+  face: [number, number];
+  yaw: number;
+  /** Clip 171's origin: the feet at the start of the climb. */
+  origin: Vec3;
+  /** Clip time, ticks. */
+  t: number;
+  /** Where the body stood when it started, relative to the clip origin; fades out over FENCE_GRAB_TIME. */
+  grab: Vec3;
+  grabLeft: number;
+}
 
 interface Climb {
   ladder: Ladder;
@@ -171,12 +198,13 @@ class Player implements PlayerService {
   dead = false;
   /** The debug third-person toggle (V). */
   private debugThirdPerson = false;
-  /** Third person while climbing a ladder, as IGI shows it, or when toggled with V. */
+  /** Third person while climbing a ladder or a fence, as IGI shows it, or when toggled with V. */
   get thirdPerson() {
     return this.debugThirdPerson || this.climbing;
   }
+  /** On a ladder or going over a fence. */
   private get climbing() {
-    return this.climb !== null;
+    return this.climb !== null || this.vault !== null;
   }
   set thirdPerson(on: boolean) {
     this.debugThirdPerson = on;
@@ -202,6 +230,10 @@ class Player implements PlayerService {
   /** The level's ladders (found on first use: they are placed by the world system). */
   private ladderList: Ladder[] | null = null;
   private landings = new Map<Ladder, number | null>();
+  /** Going over a fence (null otherwise). */
+  private vault: FenceClimb | null = null;
+  /** The level's climbable fences (found on first use, like the ladders). */
+  private fenceList: Fence[] | null = null;
   /** The ladder just left: until the body is clear of it, it moves against real shapes only, not hulls. */
   private clearOf: Ladder | null = null;
   private prone = false;
@@ -270,6 +302,7 @@ class Player implements PlayerService {
     this.spawned = true;
     this.grounded = false;
     this.climb = null;
+    this.vault = null;
     this.clearOf = null;
   }
 
@@ -306,13 +339,20 @@ class Player implements PlayerService {
     // Ladders (magicobj.qvm TASKTYPE_LADDER models): walking into one, or onto one's top from its landing, or pressing
     // use while the ladder icon shows, gets on.
     let grab: ReturnType<Player["ladderInReach"]> = null;
+    let fence: ReturnType<Player["fenceInReach"]> = null;
     if (!this.climbing && this.grounded && !leaning && this.stance === "stand") {
       grab = this.ladderInReach(fwd);
       if (grab?.reach && (grab.moving || input.wasPressed("use"))) this.mountLadder(grab.ladder, grab.top);
+      // Fences: facing one up close shows IGI's fence icon; use or jump climbs it.
+      if (!grab) {
+        fence = this.fenceInReach();
+        if (fence && (input.wasPressed("use") || input.wasPressed("jump"))) this.startVault(fence.fence, fence.side, fence.along);
+      }
     }
-    this.game.services.hud?.action(grab && !this.climbing ? "ladder" : null);
+    this.game.services.hud?.action(this.climbing ? null : grab ? "ladder" : fence ? "fence" : null);
 
-    if (this.climbing) this.updateLadder(dt, fwd, input.wasPressed("jump"), input.isDown("crouch"));
+    if (this.vault) this.updateVault(dt);
+    else if (this.climb) this.updateLadder(dt, fwd, input.wasPressed("jump"), input.isDown("crouch"));
     else if (this.grounded) this.updateGround(dt, leaning ? 0 : fwd, leaning ? 0 : side, input.isDown("walk"), input.wasPressed("jump"));
     else this.updateAir(dt, fwd, side);
 
@@ -668,6 +708,97 @@ class Player implements PlayerService {
     return inside;
   }
 
+  // --- fences ----------------------------------------------------------------------------------------------------
+
+  private get fences(): Fence[] {
+    if (!this.fenceList) {
+      this.fenceList = findFences(this.game);
+      if (this.fenceList.length) console.info(`player: ${this.fenceList.length} climbable fences`);
+    }
+    return this.fenceList;
+  }
+
+  /** A fence Jones could climb from where he stands: close to it, between its ends, facing it, not electrified. */
+  private fenceInReach(): { fence: Fence; side: number; along: number } | null {
+    const feet = this.entity.position;
+    const look = direction(this.yaw);
+    for (const f of this.fences) {
+      const dx = feet[0] - f.origin[0], dy = feet[1] - f.origin[1];
+      const along = dx * f.along[0] + dy * f.along[1];
+      const out = dx * f.normal[0] + dy * f.normal[1];
+      if (Math.abs(out) > FENCE_REACH || along < f.start + FENCE_MARGIN || along > f.end - FENCE_MARGIN) continue;
+      if (Math.abs(feet[2] - f.origin[2]) > 0.8 * METRE) continue;
+      const side = out >= 0 ? 1 : -1;
+      // Facing into the panel: along -normal from the +normal side.
+      if (-(look[0] * f.normal[0] + look[1] * f.normal[1]) * side < 0.6) continue;
+      if (f.electric.trim() && this.game.services.mission?.evaluate(f.electric)) continue;
+      // Somewhere to come down on the far side.
+      const land = this.fencePoint(f, along, side * (FENCE_START - this.fenceTravel()));
+      const ground = this.physics?.groundHeight(land[0], land[1], feet[2] + METRE) ?? null;
+      if (ground === null || ground < feet[2] - 3 * METRE) continue;
+      return { fence: f, side, along };
+    }
+    return null;
+  }
+
+  /** A point on the ground plane of a fence: `along` its panel, `out` from it (positive on the +normal side). */
+  private fencePoint(f: Fence, along: number, out: number): Vec3 {
+    return [f.origin[0] + f.along[0] * along + f.normal[0] * out, f.origin[1] + f.along[1] * along + f.normal[1] * out, f.origin[2]];
+  }
+
+  /** How far forward clip 171 carries the pelvis (1.49 m). */
+  private fenceTravel(): number {
+    const len = this.clipLength(CLIP.fence);
+    const r0 = this.clipRoot(CLIP.fence, 0), r1 = this.clipRoot(CLIP.fence, len);
+    return r1[1] - r0[1];
+  }
+
+  private startVault(f: Fence, side: number, along: number) {
+    const feet: Vec3 = [...this.entity.position] as Vec3;
+    const face: [number, number] = [-f.normal[0] * side, -f.normal[1] * side];
+    const start = this.fencePoint(f, along, side * FENCE_START);
+    const origin: Vec3 = [start[0], start[1], feet[2]];
+    this.vault = { fence: f, face, yaw: Math.atan2(-face[0], face[1]), origin, t: 0, grab: vec3.sub(feet, origin), grabLeft: FENCE_GRAB_TIME };
+    this.yaw = this.vault.yaw;
+    this.clips?.play(CLIP.fence, { speed: 0, blend: 0.1 });
+    this.clips?.seek(0);
+    this.lean = this.peek = 0;
+    this.air = [0, 0, 0];
+    this.walkVelocity = [0, 0, 0];
+    this.grounded = false;
+    this.clearOf = null;
+    this.sound("jump_1");
+    this.game.events.emit("noise", { position: feet, radius: LADDER_NOISE, sourceId: this.entity.id, kind: "ladder" });
+  }
+
+  /** Feet for the climb pose at clip time `t`: the origin plus the pelvis' travel, at its height less a standing pelvis. */
+  private vaultFeet(v: FenceClimb, t: number): Vec3 {
+    const r0 = this.clipRoot(CLIP.fence, 0), r = this.clipRoot(CLIP.fence, t);
+    const rx = r[0] - r0[0], ry = r[1] - r0[1];
+    const [fx, fy] = v.face;
+    return [v.origin[0] + fy * rx + fx * ry, v.origin[1] - fx * rx + fy * ry, v.origin[2] + r[2] - r0[2]];
+  }
+
+  /** Over the fence: clip 171 plays through at the movement clips' rate, then Jones drops to the ground. */
+  private updateVault(dt: number) {
+    const v = this.vault!;
+    this.gait = "ladder";
+    const length = this.clipLength(CLIP.fence);
+    v.t = Math.min(length, v.t + dt * ANIM_TICKS_PER_SECOND * this.data.params.rootMotionScale);
+    this.clips?.seek(Math.min(v.t, length - 1));
+    v.grabLeft = Math.max(0, v.grabLeft - dt);
+    const feet = vec3.add(this.vaultFeet(v, v.t), vec3.scale(v.grab, (v.grabLeft / FENCE_GRAB_TIME) ** 2));
+    this.velocity = dt > 0 ? vec3.scale(vec3.sub(feet, this.entity.position), 1 / dt) : [0, 0, 0];
+    this.entity.position = feet;
+    if (v.t < length) return;
+    // The clip ends mid-drop: fall the rest of the way.
+    this.vault = null;
+    this.velocity = [0, 0, 0];
+    this.air = [0, 0, 0];
+    this.grounded = false;
+    this.clips?.play(CLIP.fall);
+  }
+
   /** Move the feet through physics, handle ground snapping, take-off into a fall, and landing. */
   private moveBody(dt: number, v: Vec3) {
     const physics = this.physics;
@@ -822,6 +953,7 @@ class Player implements PlayerService {
     this.entity.health = 0;
     this.gait = "dead";
     this.climb = null;
+    this.vault = null;
     this.game.services.hud?.action(null);
     this.lean = this.peek = 0;
     this.sound(`player_death_${1 + Math.floor(Math.random() * 3)}`);
@@ -861,9 +993,13 @@ class Player implements PlayerService {
     const decay = Math.pow(PHYSICS.knockDecay, dt * 30);
     this.knock[0] *= decay;
     this.knock[1] *= decay;
-    // Landing dip: a damped spring back to 0.
-    this.dipVelocity += (-this.dip * 180 - this.dipVelocity * 22) * dt;
-    this.dip += this.dipVelocity * dt;
+    // Landing dip: a damped spring back to 0. Stepped at 240 Hz at most: in one explicit step the damping alone
+    // overshoots past dt = 2/22 s, and frames reach 0.1 s (a hitch or a slow machine), which blew the camera away.
+    for (let left = dt; left > 0; left -= 1 / 240) {
+      const h = Math.min(left, 1 / 240);
+      this.dipVelocity += (-this.dip * 180 - this.dipVelocity * 22) * h;
+      this.dip += this.dipVelocity * h;
+    }
     // Flinch recovers quickly.
     const f = Math.exp(-dt * 9);
     this.flinch.pitch *= f;
@@ -884,6 +1020,7 @@ class Player implements PlayerService {
     if (this.dead) target = 0.25 * METRE;
     // On a ladder the feet already ride the clip's pelvis (see climbFeet), so the eye sits a standing pelvis above.
     if (this.climb) target = this.clipRoot(CLIP.ladder, 0)[2] + PHYSICS.eyeAbovePelvis;
+    if (this.vault) target = this.clipRoot(CLIP.fence, 0)[2] + PHYSICS.eyeAbovePelvis;
     this.eyeHeight += (target - this.eyeHeight) * (1 - Math.exp(-dt * (this.dead ? 2 : 25)));
 
     // Lean: sideways offset, shortened when a wall is in the way.
@@ -909,7 +1046,16 @@ class Player implements PlayerService {
       this.body.object.visible = showBody;
       if (showBody) {
         const c = this.climb;
-        if (c) {
+        const v = this.vault;
+        if (v) {
+          // Posed with the root held at clip 171's first key: stand it at the origin plus the root's travel.
+          const r0 = this.clipRoot(CLIP.fence, 0), r = this.clipRoot(CLIP.fence, v.t);
+          const [fx, fy] = v.face;
+          const dx = r[0] - r0[0], dy = r[1] - r0[1];
+          const grab = vec3.scale(v.grab, (v.grabLeft / FENCE_GRAB_TIME) ** 2);
+          const at: Vec3 = [v.origin[0] + fy * dx + fx * dy, v.origin[1] - fx * dx + fy * dy, v.origin[2]];
+          this.body.place(game.local(vec3.add(at, grab)), v.yaw);
+        } else if (c) {
           // The body is posed with its root held at the clip's first key, so it stands at the clip origin plus the
           // root's travel since then, facing the rungs.
           const r0 = this.clipRoot(c.clip, 0), r = this.clipRoot(c.clip, c.t);

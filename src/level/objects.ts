@@ -25,6 +25,8 @@ export interface Placement {
    * the id; wagons are its Train children in order).
    */
   carrier?: { task: number; car: number };
+  /** Fence only: the "Electric Expression" (a mission expression; the fence is live while it holds; "" never). */
+  electric?: string;
 }
 
 export interface HeightMapTask {
@@ -107,8 +109,9 @@ export function levelObjects(statements: QvmCall[]): LevelObjects {
         ...gated,
       });
     } else if (t === "Fence" && typeof rest[4] === "string") {
-      // Fence: position, gamma angle, model.
-      placements.push({ type: t, name: String(name), id: num(id), position: [p[0], p[1], p[2]], rotation: [0, 0, p[3]], model: rest[4], ...gated });
+      // Fence: position, gamma angle, model, electric expression.
+      const electric = typeof rest[5] === "string" ? rest[5] : "";
+      placements.push({ type: t, name: String(name), id: num(id), position: [p[0], p[1], p[2]], rotation: [0, 0, p[3]], model: rest[4], electric, ...gated });
     } else if (t === "HeightMap") {
       // HeightMap: position, level, size, isEdit, bitmap id, normal smooth, blur smooth.
       heightMaps.push({ position: [p[0], p[1], p[2]], level: p[3], size: p[4], id: p[6] });

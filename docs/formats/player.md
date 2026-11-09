@@ -91,6 +91,23 @@ hooked over towards -Y onto the roof or deck. The climber stands on +Y facing -Y
 - Getting on: walk into a ladder's foot (within 1.3 m, facing it) or out over its top from the landing, or press use
   while the ladder icon (`status.res` `a_ladder`) shows.
 
+## Fences (*data*; open-igi's reading)
+
+The `Fence` task (position, gamma, model, electric expression) places a chain-link panel Jones climbs over. Mission
+1's one (`ClimbableFences`, model `302_01_1`, where Anya says "It looks like you can climb the fence into the next
+section") is the first; Missions 5, 7 and 11 place more, and Mission 6's are electric (`ConditionalContainer_360.isRun`
+until the generator is shut down). The panels (`302_01_1`, `302_02_1`, `370_01_1`, `370_02_1`) run along model X from
+0, are 0.14 m thick about Y = 0 and 3.9 m tall; Mission 7's 2 m `331_01_1` is also a Fence task. No magicobj type
+marks them: the climb belongs to the task.
+
+- **Clip 171** (6.0 s at the clip's rate, played x1.75 like the others) is the climb: the pelvis rises hand over hand
+  to 3.85 m, swings over (forward 0.33 m to 1.28 m between 5.4 s and 5.9 s) and the clip ends mid-drop, 1.49 m
+  forward of the start with the pelvis 0.64 m above a standing one.
+- open-igi lays the clip's origin 0.6 m out from the panel, facing it, so the hands meet the wire and the feet land
+  0.89 m past it; the drop finishes as a fall. Facing a panel at least 3.5 m tall within 1.2 m (and 0.4 m in from
+  its ends), not electrified, shows the fence icon (`a_fence`, "Climb fence"); use or jump climbs. IGI's exact reach
+  and placement are not known.
+
 ## `material/material.qvm` (*data*)
 
 `SetActiveMaterial(i); DefineGameMaterial(name, ?, ?, ?, ?, footstepRange (m), walk1..walk6, land, rain, bullet
