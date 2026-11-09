@@ -121,29 +121,38 @@ export class IgiPhysics implements PhysicsService {
       part: this.world.materialName(w.material),
       model: w.object >= 0 ? this.world.objects[w.object].model : undefined,
     };
-    // Bullets fly on through fences and glass.
+    // Bullets fly on through fences and glass, and a gunner's shots leave his own vehicle. A character standing before
+    // that surface is hit first: continuing past it straight away skipped everyone between the muzzle and the glass,
+    // so a guard between two windows (or a window and a fence) took no bullets from in line with both.
     const info = w && options?.bullet ? this.world.materials[w.material] : undefined;
-    if (w && info && bulletsPass(info)) return this.raycastPast(from, to, w.distance, options);
+    const ownVehicle = w && w.body >= 0 && options?.ignoreEntity !== undefined && this.colliders.get(w.body)?.entityId === options.ignoreEntity;
+    if (w && ((info && bulletsPass(info)) || ownVehicle)) {
+      const before = options?.entities === false ? null : this.nearestEntity(from, to, w.distance, options);
+      return before ?? this.raycastPast(from, to, w.distance, options);
+    }
     if (best?.model && this.ladders.has(best.model)) best.ladder = true;
     if (best && w && w.body >= 0) {
       const body = this.colliders.get(w.body);
       best.collider = w.body;
       best.model = body?.model;
-      if (body?.entityId != null) {
-        if (body.entityId === options?.ignoreEntity) return this.raycastPast(from, to, w.distance, options);
-        if (options?.entities !== false) best.entityId = body.entityId;
-      }
+      if (body?.entityId != null && options?.entities !== false) best.entityId = body.entityId;
     }
     if (options?.entities === false) return best;
+    return this.nearestEntity(from, to, best ? best.distance : Infinity, options) ?? best;
+  }
+
+  /** The nearest character capsule the segment from → to enters closer than `within` (units along it), if any. */
+  private nearestEntity(from: Vec3, to: Vec3, within: number, options?: RaycastOptions): RayHit | null {
     const d = vec3.sub(to, from);
     const len = vec3.length(d);
-    if (len === 0) return best;
+    if (len === 0) return null;
+    let best: RayHit | null = null;
     for (const e of this.game.entities.all()) {
       if (!e.alive || e.id === options?.ignoreEntity || e.radius <= 0 || e.height <= 0) continue;
       const t = rayCapsule(from, d, e.position, e.radius, e.height);
       if (t === null) continue;
       const dist = t * len;
-      if (best && dist >= best.distance) continue;
+      if (dist >= (best ? best.distance : within)) continue;
       const point = vec3.add(from, vec3.scale(d, t));
       const rel = (point[2] - e.position[2]) / e.height;
       const axisZ = Math.min(Math.max(point[2], e.position[2] + e.radius), e.position[2] + e.height - e.radius);
