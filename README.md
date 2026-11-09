@@ -18,7 +18,7 @@ music. Mission 1 is playable; later missions load and run but have rougher edges
 
 ## How to play
 
-1. Open **https://apekshik.github.io/open-igi/** in a desktop browser (Chrome, Edge or Firefox).
+1. Open **https://freeigi.com** in a desktop browser (Chrome, Edge or Firefox).
 2. The game opens at the main menu and streams its data as you play: a mission downloads what it needs when it
    loads. To use your own copy instead, open `?view=landing` and import the install folder (the one with `missions`
    and `common`, usually `PC`), a `.zip` of it, or the game's `.iso`; it is kept in your browser, never uploaded.
