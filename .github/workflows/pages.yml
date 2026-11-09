@@ -26,6 +26,9 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+        env:
+          # Where the hosted game data lives (scripts/public.mjs); unset, players import their own copy.
+          VITE_IGI_DATA_URL: ${{ vars.IGI_DATA_URL }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
