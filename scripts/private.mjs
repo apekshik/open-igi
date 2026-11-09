@@ -10,9 +10,10 @@
 //
 // The files are served as igi/index.json and igi/file/<lowercased path>, the layout of the dev mount.
 import { execSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stageGameData } from "./stage-data.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const envFile = (() => {
@@ -38,22 +39,7 @@ execSync(`npx vite build --outDir "${out}" --emptyOutDir false`, {
   env: { ...process.env, VITE_IGI_DATA_URL: "./igi/" },
 });
 
-const index = [];
-const walk = (dir) => {
-  for (const n of readdirSync(dir)) {
-    const p = join(dir, n);
-    if (statSync(p).isDirectory()) walk(p);
-    else {
-      const key = relative(resolve(root, data), p).split(sep).join("/").toLowerCase();
-      const dest = join(out, "igi", "file", key);
-      mkdirSync(dirname(dest), { recursive: true });
-      copyFileSync(p, dest);
-      index.push(key);
-    }
-  }
-};
-walk(resolve(root, data));
-writeFileSync(join(out, "igi", "index.json"), JSON.stringify(index));
+const index = stageGameData(resolve(root, data), join(out, "igi"));
 console.log(`${index.length} game files -> ${out}`);
 
 if (alias) {

@@ -10,6 +10,38 @@ their browser.
 The site lives at https://apekshik.github.io/open-igi/. `vite.config.ts` uses `base: "./"`, so the same build also
 works from any other static host or sub-path.
 
+## Hosted game data (Cloudflare R2)
+
+The game data is distributed with the rights holder's permission ([NOTICE.md](../NOTICE.md)) from an R2 bucket, never
+from git. The engine build finds it through `VITE_IGI_DATA_URL`, read from the `IGI_DATA_URL` repository variable by
+`pages.yml`; with the variable unset, the site falls back to the import screen.
+
+1. Create the bucket and give it a public custom domain (the `r2.dev` URL is rate-limited and not meant for production):
+   `npx wrangler login`, `npx wrangler r2 bucket create open-igi-data`, then Dashboard > R2 > open-igi-data >
+   Settings > Custom Domains.
+2. Allow the site to read it cross-origin (Settings > CORS policy):
+   `[{"AllowedOrigins":["https://apekshik.github.io","http://localhost:5173","http://localhost:4173"],"AllowedMethods":["GET","HEAD"],"AllowedHeaders":["*"],"MaxAgeSeconds":86400}]`
+3. Upload: `IGI_DATA=C:/path/to/PC node scripts/public.mjs --upload open-igi-data` (about 2,100 files; executables and
+   shortcuts are left out; `index.json` goes last).
+4. Point the site at it: `gh variable set IGI_DATA_URL --body "https://<custom domain>/"` (trailing slash), then rerun
+   the Pages workflow.
+
+The bucket serves `index.json` (every file's lowercased path) and `file/<path>`, the layout `vfsFromDevServer` reads.
+
+### Vercel (asterisk-inc/open-igi, https://open-igi-flame.vercel.app)
+
+The hosted-data site is also deployed to Vercel. Build locally with the data URL and upload the result prebuilt
+(`vercel build` fails on Windows creating symlinks, and remote builds did not pick up the env var):
+
+```bash
+VITE_IGI_DATA_URL="https://<bucket address>/" npm run build
+rm -rf .vercel/output && mkdir -p .vercel/output && cp -r dist .vercel/output/static
+echo '{"version":3}' > .vercel/output/config.json
+npx vercel deploy --prebuilt --prod --yes
+```
+
+Every site address that loads the data must be in the bucket's CORS `AllowedOrigins`.
+
 ## Data import (`src/vfs/`, `src/app/landing.ts`)
 
 - **Sources** (`sources.ts`): a folder (File System Access `showDirectoryPicker`, `<input webkitdirectory>` or a

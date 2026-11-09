@@ -1,14 +1,15 @@
 # open-igi
 
 A from-scratch web engine for *Project I.G.I.: I'm Going In* (2000), in the spirit of OpenRW and OpenMW.
-It runs in the browser on three.js and loads the game data from **your own copy** of the game.
+It runs in the browser on three.js. The hosted site streams the game data, distributed with the permission of
+[RIGHTS HOLDER] (see [NOTICE.md](NOTICE.md)), so anyone can play without owning a copy.
 
 This repo contains no game data. It builds on community reverse-engineering of the original game, credited in
 [THIRD_PARTY.md](THIRD_PARTY.md). See [docs/RULES.md](docs/RULES.md) for the project rules.
-You need your own copy of the game to play.
 
-open-igi is a free, non-commercial fan project. It is not affiliated with or endorsed by the owners of Project I.G.I.
-"Project I.G.I." and related names are trademarks of their respective owners.
+open-igi is a free, non-commercial, unofficial preservation project. It is not affiliated with the owners of
+Project I.G.I.; the game data is distributed with their permission. "Project I.G.I." and related names are trademarks
+of their respective owners.
 
 ## Status
 
@@ -18,9 +19,9 @@ music. Mission 1 is playable; later missions load and run but have rougher edges
 ## How to play
 
 1. Open **https://apekshik.github.io/open-igi/** in a desktop browser (Chrome, Edge or Firefox).
-2. **Import your copy of the game** once: drop or choose the install folder (the one with `missions` and `common`,
-   usually `PC`), a `.zip` of it, or the game's `.iso`. The files are checked and kept in your browser (about 400 MB,
-   never uploaded). A 180 MB zip imports in about 10 seconds. Later visits go straight to the main menu.
+2. The game opens at the main menu and streams its data as you play: a mission downloads what it needs when it
+   loads. To use your own copy instead, open `?view=landing` and import the install folder (the one with `missions`
+   and `common`, usually `PC`), a `.zip` of it, or the game's `.iso`; it is kept in your browser, never uploaded.
 3. **Play Project IGI**, pick a mission, and click when the loading bar is full. Missions unlock in order, as in the
    original; add `?missions=all` to the address to pick any.
 
