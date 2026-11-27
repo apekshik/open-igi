@@ -71,6 +71,29 @@ export interface Page {
   decorate?: (ctx: CanvasRenderingContext2D, theme: MenuTheme, time: number) => void;
 }
 
+const NOTICE_FOOTER = "A free, unofficial fan preservation project. Not for profit: no ads, no payments, ever.";
+const NOTICE_TITLE = "About this project";
+const NOTICE_TEXT = [
+  "This is a free, unofficial fan project made to preserve Project I.G.I.: I'm Going In (2000) and let people play it again on modern machines.",
+  "It is not for sale and makes no money: no ads, no payments, no accounts. It exists purely out of love for this game and the people who grew up playing it.",
+  "Project I.G.I. and its game content belong to their respective owners and are used with their permission. This project is not affiliated with or endorsed by them.",
+];
+
+/** Split text into lines that fit `width` at the context's current font. */
+function wrap(ctx: CanvasRenderingContext2D, text: string, width: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(" ")) {
+    const next = line ? `${line} ${word}` : word;
+    if (line && ctx.measureText(next).width > width) {
+      lines.push(line);
+      line = word;
+    } else line = next;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 /** The menu surface: one canvas over the game host, showing a page and optionally a popup dialog. */
 export class MenuCanvas {
   readonly canvas = document.createElement("canvas");
@@ -87,6 +110,8 @@ export class MenuCanvas {
   private running = false;
   private time = 0;
   private cleanup: (() => void)[] = [];
+  /** The full project notice is open over the page. */
+  private noticeOpen = false;
 
   constructor(host: HTMLElement, theme: MenuTheme) {
     this.theme = theme;
@@ -105,6 +130,13 @@ export class MenuCanvas {
     on("pointerleave", () => (this.mouse = { x: -100, y: -100 }));
     on("pointerdown", (e) => {
       this.theme.audio.unlock();
+      // The project notice: the "i" button opens it, any click closes it.
+      const b = this.infoButton(this.canvas.clientWidth);
+      if (this.noticeOpen || Math.hypot(e.offsetX - b.x, e.offsetY - b.y) <= b.r + 4) {
+        this.noticeOpen = !this.noticeOpen;
+        e.preventDefault();
+        return;
+      }
       this.mouse = this.toMenu(e.offsetX, e.offsetY);
       const w = this.widgetAt(this.mouse.x, this.mouse.y);
       if (!w || !w.enabled) return;
@@ -207,8 +239,77 @@ export class MenuCanvas {
       ctx.fillRect(-this.ox / this.scale, -this.oy / this.scale, w / this.scale, h / this.scale);
       this.drawPage(this.popup, true);
     }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.drawNotice(ctx, w, h);
+    ctx.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, dpr * this.ox, dpr * this.oy);
     const pointer = this.theme.sprites.get("pointer");
     if (pointer && this.mouse.x > -50) ctx.drawImage(pointer.frames[0], this.mouse.x, this.mouse.y);
+  }
+
+  /** The info button's circle, in screen pixels (top right). */
+  private infoButton(w: number) {
+    const r = 13;
+    return { x: w - r - 14, y: r + 14, r };
+  }
+
+  /**
+   * The project notice on every menu screen: a footer line, and an "i" button at the top right that opens the full
+   * text (a free, non-commercial preservation project, not affiliated with the game's owners).
+   */
+  private drawNotice(ctx: CanvasRenderingContext2D, w: number, h: number) {
+    ctx.save();
+    ctx.textBaseline = "middle";
+    const b = this.infoButton(w);
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(10,20,10,0.75)";
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "#9fdc8c";
+    ctx.stroke();
+    ctx.fillStyle = "#c8f0b8";
+    ctx.font = "bold 15px Georgia, serif";
+    ctx.textAlign = "center";
+    ctx.fillText("i", b.x, b.y + 1);
+
+    // Top left, opposite the button: the 4:3 menu fills the height of a wide screen, so the bottom has no free space.
+    const size = Math.max(10, Math.min(13, w / 100));
+    ctx.font = `${size}px system-ui, sans-serif`;
+    ctx.textAlign = "left";
+    const lines = wrap(ctx, NOTICE_FOOTER, Math.min(360, w * 0.3));
+    const lh = size + 4;
+    const bw = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 16;
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(10, 10, bw, lines.length * lh + 10);
+    ctx.fillStyle = "rgba(200,240,184,0.9)";
+    lines.forEach((l, i) => ctx.fillText(l, 18, 15 + lh / 2 + i * lh));
+
+    if (this.noticeOpen) {
+      ctx.fillStyle = "rgba(0,0,0,0.7)";
+      ctx.fillRect(0, 0, w, h);
+      const pw = Math.min(560, w - 40);
+      const lineH = 22;
+      ctx.font = "15px system-ui, sans-serif";
+      const lines = NOTICE_TEXT.flatMap((p, i) => [...(i ? [""] : []), ...wrap(ctx, p, pw - 48)]);
+      const ph = 70 + lines.length * lineH + 40;
+      const px = (w - pw) / 2, py = Math.max(20, (h - ph) / 2);
+      ctx.fillStyle = "rgba(8,16,8,0.95)";
+      ctx.fillRect(px, py, pw, ph);
+      ctx.strokeStyle = "#9fdc8c";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#c8f0b8";
+      ctx.font = "bold 18px system-ui, sans-serif";
+      ctx.fillText(NOTICE_TITLE, px + 24, py + 34);
+      ctx.font = "15px system-ui, sans-serif";
+      ctx.fillStyle = "#e4f5dc";
+      lines.forEach((l, i) => ctx.fillText(l, px + 24, py + 70 + i * lineH));
+      ctx.fillStyle = "rgba(200,240,184,0.7)";
+      ctx.font = "13px system-ui, sans-serif";
+      ctx.fillText("Click anywhere to close", px + 24, py + ph - 22);
+    }
+    ctx.restore();
   }
 
   private drawPage(page: Page, interactive: boolean) {
